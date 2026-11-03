@@ -1,0 +1,10 @@
+{
+  "name": "ragbase",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI knowledge-base chat agent (RAG) — FastAPI backend + web frontend",
+  "scripts": {
+    "dev": ".venv/bin/python run.py --host 0.0.0.0 --port 7123",
+    "start": ".venv/bin/python run.py --host 0.0.0.0 --port ${PORT:-8000}"
+  }
+}

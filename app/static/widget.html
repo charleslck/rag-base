@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RAGbase Chat</title>
+<style>
+  :root {
+    --bg: #0d1217; --panel: #141a21; --panel-2: #1a212a; --border: #232c37;
+    --text: #e4e9ef; --dim: #93a0ae; --accent: #c6f24e; --accent-ink: #131a08;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "Avenir Next", "Helvetica Neue", "Segoe UI", -apple-system, sans-serif;
+    font-size: 15px; line-height: 1.6; display: flex; flex-direction: column;
+  }
+  button { font-family: inherit; cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .head {
+    display: flex; align-items: center; gap: 10px; padding: 14px 16px;
+    background: var(--panel); border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
+  .head-title { font-weight: 800; font-size: 15px; }
+  .head-sub { font-size: 12px; color: var(--dim); margin-left: auto; }
+
+  .msgs { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 88%; padding: 10px 13px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; }
+  .msg.user { align-self: flex-end; background: var(--panel-2); border: 1px solid var(--border); border-bottom-right-radius: 4px; }
+  .msg.bot { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .msg .c { display: inline-flex; min-width: 18px; height: 18px; padding: 0 4px; margin: 0 2px; border-radius: 5px;
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--accent);
+    font-size: 10.5px; font-weight: 700; font-family: var(--mono); vertical-align: baseline; }
+  .msg strong { font-weight: 700; }
+  .srcs { align-self: flex-start; display: flex; flex-wrap: wrap; gap: 4px; }
+  .srcs span { font-size: 11px; color: var(--dim); border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; }
+
+  .composer { display: flex; gap: 8px; padding: 12px; background: var(--panel); border-top: 1px solid var(--border); flex-shrink: 0; }
+  .composer textarea {
+    flex: 1; resize: none; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--bg); color: var(--text); font-family: inherit; font-size: 14px;
+    padding: 10px 12px; max-height: 120px; line-height: 1.5;
+  }
+  .composer textarea:focus { border-color: var(--accent); outline: none; }
+  .composer textarea::placeholder { color: var(--dim); }
+  .send {
+    width: 44px; height: 44px; flex-shrink: 0; border: none; border-radius: 10px;
+    background: var(--accent); color: var(--accent-ink); font-size: 17px; font-weight: 800;
+  }
+  .send:disabled { opacity: 0.5; cursor: not-allowed; }
+  .err { align-self: center; color: #f4876f; font-size: 13px; }
+  .scrollbars, .msgs, .composer textarea { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <span class="dot"></span>
+    <span class="head-title">Ask us anything</span>
+    <span class="head-sub">answers from our docs</span>
+  </div>
+  <div class="msgs" id="msgs"></div>
+  <form class="composer" id="composer">
+    <textarea id="input" rows="1" placeholder="Type your question…" aria-label="Message"></textarea>
+    <button type="submit" class="send" id="send" aria-label="Send">↑</button>
+  </form>
+
+<script>
+"use strict";
+const KEY = new URLSearchParams(location.search).get("key") || "";
+const GREETING = "Hi! Ask me anything — I answer from our documentation and cite my sources.";
+const msgs = document.getElementById("msgs");
+const input = document.getElementById("input");
+const convKey = "ragbase_widget_conv_" + KEY.slice(0, 10);
+let convId = localStorage.getItem(convKey) || null;
+let busy = false;
+
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+function md(s){let h=esc(s);h=h.replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>");h=h.replace(/`([^`]+)`/g,"<code>$1</code>");return h;}
+function cite(s){return md(s).replace(/\[(\d{1,2})\]/g,'<span class="c">[$1]</span>');}
+
+function add(role, html, sources){
+  const d=document.createElement("div");
+  d.className="msg "+(role==="user"?"user":"bot");
+  d.innerHTML=html;
+  msgs.appendChild(d);
+  if(sources&&sources.length){
+    const s=document.createElement("div");
+    s.className="srcs";
+    s.innerHTML=sources.map(x=>"<span>["+x.rank+"] "+esc(x.doc_name)+"</span>").join("");
+    msgs.appendChild(s);
+  }
+  msgs.scrollTop=msgs.scrollHeight;
+}
+
+add("bot", md(GREETING));
+
+input.addEventListener("input",()=>{input.style.height="auto";input.style.height=Math.min(input.scrollHeight,120)+"px";});
+input.addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();document.getElementById("composer").requestSubmit();}});
+document.getElementById("composer").addEventListener("submit",async e=>{
+  e.preventDefault();
+  const text=input.value.trim();
+  if(!text||busy)return;
+  input.value="";input.style.height="auto";
+  busy=true;document.getElementById("send").disabled=true;
+  add("user",esc(text));
+  try{
+    const res=await fetch("/api/widget/chat",{method:"POST",
+      headers:{"Content-Type":"application/json","X-API-Key":KEY},
+      body:JSON.stringify({message:text,conversation_id:convId})});
+    const data=await res.json();
+    if(!res.ok)throw new Error(data.detail||("HTTP "+res.status));
+    convId=data.conversation_id;
+    localStorage.setItem(convKey,convId);
+    add("bot",cite(data.answer),data.sources);
+  }catch(err){add("bot",'<span class="err">'+esc(err.message)+"</span>");}
+  finally{busy=false;document.getElementById("send").disabled=false;input.focus();}
+});
+</script>
+</body>
+</html>
