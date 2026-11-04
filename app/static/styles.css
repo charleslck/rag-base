@@ -335,7 +335,7 @@ button { font-family: inherit; cursor: pointer; }
 
 /* ---------- folders ---------- */
 /* the trail is also a drop target: drag a file onto "全部文件" to take it out */
-.lib-crumbs { flex-shrink: 0; padding: 0 20px 2px; }
+.lib-crumbs { flex-shrink: 0; padding: 9px 20px 0; }
 .lib-crumb-list {
   display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
   list-style: none; margin: 0; padding: 0;
@@ -457,7 +457,9 @@ button { font-family: inherit; cursor: pointer; }
 .modal-sm { width: min(400px, 100%); }
 .modal-sm .modal-body { padding-bottom: 6px; }
 .modal-sm .modal-body p { font-size: 13.5px; line-height: 1.65; }
-.modal-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 0 18px 16px; }
+/* the small dialogs cut their body's bottom padding to 6px so this bar owns the
+   space above it — without the margin the buttons sat on top of the input */
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; padding: 0 18px 16px; }
 .btn-danger {
   background: var(--danger); color: #1d100c; border: none; border-radius: var(--radius);
   font-weight: 700; font-size: 13px; padding: 9px 16px;
@@ -474,7 +476,7 @@ button { font-family: inherit; cursor: pointer; }
   .lib-sort { flex: 0 1 auto; min-width: 0; }
   .lib-upload { margin-left: auto; }
   .lib-sel { margin-left: 0; width: 100%; gap: 8px; }
-  .lib-crumbs { padding: 0 14px 2px; }
+  .lib-crumbs { padding: 8px 14px 0; }
   .lib-body { padding: 12px 14px 32px; }
   .lib-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
   .lib-empty { min-height: 44vh; }
