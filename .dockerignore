@@ -1,0 +1,44 @@
+# ---- never ship local state or build junk into the image ----
+.git
+.gitignore
+.dockerignore
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime data (mounted as a volume instead)
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Tests & dev tooling (not needed at runtime)
+tests/
+pytest.ini
+requirements-dev.txt
+package.json
+
+# Marketing assets: screenshots, posters, video, page bundles
+*.png
+*.jpg
+*.jpeg
+*.mp4
+*.page
+*.pptd
+docs/
+exports/
+ragbase-*/
+*.md
+LICENSE

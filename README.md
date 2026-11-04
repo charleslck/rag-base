@@ -52,6 +52,9 @@ python run.py                      # serves on http://localhost:7100
 Open http://localhost:7100, create an account, switch to the **Knowledge base** tab,
 upload documents, and start chatting.
 
+> **Prefer containers?** `docker compose up -d --build` gives you the same app on
+> http://localhost:8000 with no local Python at all — see [Docker](#docker--one-command).
+
 > **No LLM key?** The app runs in demo mode and still retrieves and quotes relevant
 > passages — perfect for trying the product end to end. Endpoints without an embeddings
 > API (e.g. DeepSeek) work out of the box: chat goes to the LLM, embeddings stay local,
@@ -112,14 +115,73 @@ All settings live in `.env` (see [.env.example](.env.example)):
 | `RAGBASE_TOP_K` | `6` | Retrieved passages per question |
 | `RAGBASE_DATA_DIR` | `data` | SQLite database location |
 
-## Deployment
+## Docker — one command
 
-**Docker:**
+```bash
+git clone https://github.com/<you>/ragbase.git && cd ragbase
+docker compose up -d --build
+# → http://localhost:8000
+```
+
+That is the whole install. No Python, no venv, no `.env` needed: with no API key the
+container boots in demo mode, so you can register, upload a PDF and get cited answers
+immediately. Add a key later and restart — nothing else changes.
+
+Or use the launcher, which also creates `.env` on first run, waits for the health check
+and prints the URL:
+
+```bash
+./docker.sh                 # build + start + wait until healthy
+./docker.sh logs            # follow logs
+./docker.sh restart         # rebuild and restart, data kept
+./docker.sh stop            # stop, data kept
+./docker.sh destroy         # wipe container + data volume
+./docker.sh reset-password user@example.com newpass
+```
+
+| File | Purpose |
+|---|---|
+| `Dockerfile` | Python 3.12-slim, non-root (`uid 10001`), `HEALTHCHECK` on `/api/health` |
+| `docker-compose.yml` | Port, env vars, named `ragbase-data` volume, log rotation |
+| `docker-entrypoint.sh` | Auto-generates a persistent `RAGBASE_JWT_SECRET`, fixes volume ownership, drops root |
+| `.dockerignore` | Keeps `.venv`, local `data/`, screenshots and media out of the image (≈6 KB of build context vs. 40 MB) |
+| `.env.example` | Every supported variable, documented |
+
+**Configure it** — edit `.env` (copy from `.env.example`) and `docker compose up -d`:
+
+```ini
+RAGBASE_PORT=8000                       # host port
+RAGBASE_LLM_API_KEY=sk-...              # leave empty for demo mode
+RAGBASE_LLM_BASE_URL=https://api.deepseek.com/v1
+RAGBASE_LLM_MODEL=deepseek-chat
+RAGBASE_ALLOW_REGISTRATION=false        # invite-only after you create the admin
+```
+
+**Keep data in a visible folder** instead of a named volume — swap the volume line in
+`docker-compose.yml`:
+
+```yaml
+    volumes:
+      - ./data:/app/data
+```
+
+**Plain `docker run`**, if you prefer no compose:
 
 ```bash
 docker build -t ragbase .
-docker run -d -p 8000:8000 --env-file .env -v ragbase-data:/app/data ragbase
+docker run -d --name ragbase -p 8000:8000 --restart unless-stopped \
+  --env-file .env -v ragbase-data:/app/data ragbase
 ```
+
+**Backup / restore** — the instance is one SQLite file inside the volume:
+
+```bash
+docker run --rm -v ragbase-data:/data -v "$PWD":/backup alpine \
+  tar czf /backup/ragbase-backup.tar.gz -C /data .
+```
+
+The container is stateless apart from `/app/data`; `docker compose down` (without `-v`)
+never touches your documents.
 
 **Any VPS** — behind nginx/Caddy with HTTPS:
 

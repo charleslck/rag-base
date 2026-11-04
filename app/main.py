@@ -44,6 +44,12 @@ def startup():
     db.init_db()
 
 
+@app.get("/api/health")
+def health():
+    """Liveness probe for Docker/load balancers — must stay dependency-free."""
+    return {"status": "ok", "version": app.version}
+
+
 # ---------------------------------------------------------------- auth
 
 class RegisterIn(BaseModel):

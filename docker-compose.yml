@@ -1,0 +1,59 @@
+# One-command deployment:  docker compose up -d --build
+# All settings are optional — with no .env at all the app boots in demo mode
+# (fully working retrieval + cited answers, no API key required).
+services:
+  ragbase:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ragbase:latest
+    container_name: ragbase
+    restart: unless-stopped
+    ports:
+      - "${RAGBASE_PORT:-8000}:8000"
+    environment:
+      RAGBASE_DATA_DIR: /app/data
+      # leave RAGBASE_JWT_SECRET empty and the entrypoint generates + persists one
+      RAGBASE_JWT_SECRET: ${RAGBASE_JWT_SECRET:-}
+      RAGBASE_ALLOW_REGISTRATION: ${RAGBASE_ALLOW_REGISTRATION:-true}
+
+      # chat model — any OpenAI-compatible endpoint
+      RAGBASE_LLM_API_KEY: ${RAGBASE_LLM_API_KEY:-}
+      RAGBASE_LLM_BASE_URL: ${RAGBASE_LLM_BASE_URL:-https://api.openai.com/v1}
+      RAGBASE_LLM_MODEL: ${RAGBASE_LLM_MODEL:-gpt-4o-mini}
+
+      # embeddings — leave key empty to use local feature-hash vectors + BM25
+      RAGBASE_EMBEDDING_API_KEY: ${RAGBASE_EMBEDDING_API_KEY:-}
+      RAGBASE_EMBEDDING_BASE_URL: ${RAGBASE_EMBEDDING_BASE_URL:-https://api.openai.com/v1}
+      RAGBASE_EMBEDDING_MODEL: ${RAGBASE_EMBEDDING_MODEL:-text-embedding-3-small}
+
+      # limits & retrieval
+      RAGBASE_MAX_DOCS_PER_USER: ${RAGBASE_MAX_DOCS_PER_USER:-0}
+      RAGBASE_MAX_UPLOAD_MB: ${RAGBASE_MAX_UPLOAD_MB:-25}
+      RAGBASE_CHUNK_SIZE: ${RAGBASE_CHUNK_SIZE:-900}
+      RAGBASE_CHUNK_OVERLAP: ${RAGBASE_CHUNK_OVERLAP:-150}
+      RAGBASE_TOP_K: ${RAGBASE_TOP_K:-6}
+      RAGBASE_RETRIEVAL_THRESHOLD: ${RAGBASE_RETRIEVAL_THRESHOLD:-0.15}
+    volumes:
+      # named volume: survive `docker compose down`
+      - ragbase-data:/app/data
+      # prefer a visible folder instead? comment the line above and use:
+      # - ./data:/app/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  ragbase-data:

@@ -16,7 +16,11 @@ venv/
 # Environment
 .env
 .env.*
+!.env.example
 
 # Editor
 .vscode/
 .idea/
+
+# Agent workspace notes (project memory, not for the repo)
+.workbuddy/
