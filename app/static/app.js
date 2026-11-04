@@ -20,6 +20,16 @@ const state = {
   editingKey: null, // key whose customizer is open
   editorCfg: null, // working copy of that key's config
   intTab: "embed", // embed | api | keys — which rail tab is showing
+  pane: "chats", // chats | kb — which tab the sidebar rail has selected
+  libDocs: [], // every document as the server returned it
+  libShown: [], // the subset the grid is showing, after search and sort
+  libSel: new Set(), // ids ticked in the file library
+  libAnchor: null, // index of the last clicked tile, for shift-ranges
+  libQuery: "",
+  libSort: "new",
+  libView: localStorage.getItem("ragbase_lib_view") === "list" ? "list" : "grid",
+  uploading: false,
+  uploadTimer: null,
 };
 
 /* ---------------- helpers ---------------- */
@@ -157,11 +167,23 @@ $("#sidebar-backdrop").addEventListener("click", () => {
 });
 
 function switchTab(which) {
-  $("#tab-chats").classList.toggle("active", which === "chats");
-  $("#tab-kb").classList.toggle("active", which === "kb");
-  $("#pane-chats").classList.toggle("hidden", which !== "chats");
-  $("#pane-kb").classList.toggle("hidden", which !== "kb");
+  const library = which === "kb";
+  $("#tab-chats").classList.toggle("active", !library);
+  $("#tab-kb").classList.toggle("active", library);
+  $("#tab-chats").setAttribute("aria-selected", String(!library));
+  $("#tab-kb").setAttribute("aria-selected", String(library));
+  $("#pane-chats").classList.toggle("hidden", library);
+  $("#pane-kb").classList.toggle("hidden", !library);
+  // the tab swaps the main area, not just the rail: CSS does the show/hide so
+  // the sources panel's own open/closed state survives a round trip
+  $("#app-view").classList.toggle("lib-open", library);
+  state.pane = which;
   closeIntegrate();
+  if (library) {
+    renderLibrary(); // paints immediately, in case the fetch below is slow
+    loadDocuments().catch(() => {}); // the API or the widget may have added files
+    closeSidebarMobile();
+  }
 }
 
 /* integrate opens as a modal: the sidebar keeps its current tab underneath */
@@ -862,44 +884,305 @@ function closeSidebarMobile() {
   $("#sidebar-backdrop").classList.remove("show");
 }
 
-/* ---------------- documents ---------------- */
-const FILE_ICON =
-  '<svg class="doc-icon" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 1.5h5.5L13 5v9.5H4z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M9.5 1.5V5H13" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+/* ---------------- file library ----------------
+ * The knowledge base used to be a list inside a 264px rail, which works up to
+ * about ten files and then stops: one X button per row means ten clicks and ten
+ * dialogs to clear a batch. It is a gallery in the main area now — one click
+ * selects, shift-click selects a range, and a batch delete is a single request.
+ */
+const FILE_GLYPH =
+  '<svg width="26" height="26" viewBox="0 0 24 24" fill="none"><path d="M6 2.5h7.5L19 8v13.5H6z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M13.5 2.5V8H19" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+
+const EXT_LABEL = {
+  pdf: "PDF", docx: "DOC", doc: "DOC", txt: "TXT",
+  md: "MD", markdown: "MD", html: "HTML", htm: "HTML",
+};
+const LIB_VIEW_KEY = "ragbase_lib_view";
+const UPLOAD_BATCH = 8;
+
+function extOf(name) {
+  const m = /\.([a-z0-9]+)$/i.exec(name || "");
+  return m ? m[1].toLowerCase() : "txt";
+}
+
+/* The server returns documents newest first. Filtering and sorting happen here:
+   a few hundred rows sort in memory faster than they round-trip. */
+function libVisible() {
+  const q = state.libQuery.trim().toLowerCase();
+  const docs = state.libDocs.filter((d) => !q || d.filename.toLowerCase().includes(q));
+  const collator = currentLang() === "zh" ? "zh-CN" : "en";
+  const byName = (a, b) =>
+    a.filename.localeCompare(b.filename, collator, { numeric: true, sensitivity: "base" });
+  const order = {
+    new: (a, b) => b.created_at - a.created_at,
+    old: (a, b) => a.created_at - b.created_at,
+    az: byName,
+    za: (a, b) => byName(b, a),
+    chunks: (a, b) => b.num_chunks - a.num_chunks || byName(a, b),
+  };
+  return docs.sort(order[state.libSort] || order.new);
+}
+
+function tileHTML(doc, idx) {
+  const ext = extOf(doc.filename);
+  const on = state.libSel.has(doc.id);
+  const meta = doc.status === "ready"
+    ? esc(t(doc.num_chunks === 1 ? "kb.chunkOne" : "kb.chunks", { n: doc.num_chunks })) +
+      " · " + esc(fmtTime(doc.created_at))
+    : '<span class="tile-err">' + esc(doc.error || t("err.failed")) + "</span>";
+  return (
+    '<label class="tile' + (on ? " is-sel" : "") + '" data-id="' + esc(doc.id) +
+      '" data-idx="' + idx + '">' +
+      // a real checkbox keeps the tile keyboard-operable and screen-reader legible
+      '<input type="checkbox" class="tile-input" data-id="' + esc(doc.id) + '"' +
+        (on ? " checked" : "") + ' aria-label="' + esc(t("lib.pick", { name: doc.filename })) + '">' +
+      '<span class="tile-mark" aria-hidden="true"></span>' +
+      '<span class="tile-top"><span class="tile-glyph" aria-hidden="true">' + FILE_GLYPH + "</span>" +
+        '<span class="tile-ext">' + esc(EXT_LABEL[ext] || ext.slice(0, 4).toUpperCase()) + "</span></span>" +
+      '<span class="tile-name" title="' + esc(doc.filename) + '">' + esc(doc.filename) + "</span>" +
+      '<span class="tile-meta">' + meta + "</span>" +
+    "</label>"
+  );
+}
 
 async function loadDocuments() {
   const data = await api("/api/documents");
-  const list = $("#doc-list");
-  const counter = $("#doc-count");
-  list.innerHTML = "";
-  if (!data.documents.length) {
-    counter.hidden = true;
-    list.innerHTML = '<p class="pane-empty">' + t("kb.empty") + "</p>";
-    return;
-  }
-  const chunks = data.documents.reduce((n, d) => n + (d.num_chunks || 0), 0);
-  counter.hidden = false;
-  counter.textContent = t(data.documents.length === 1 ? "kb.countOne" : "kb.count",
-    { n: data.documents.length, c: chunks });
-  for (const doc of data.documents) {
-    const item = document.createElement("div");
-    item.className = "doc-item";
-    const meta = doc.status === "ready"
-      ? esc(t(doc.num_chunks === 1 ? "kb.chunkOne" : "kb.chunks", { n: doc.num_chunks })) + " · " + fmtTime(doc.created_at)
-      : '<span class="doc-error">' + esc(doc.error || t("err.failed")) + "</span>";
-    item.innerHTML =
-      FILE_ICON +
-      '<div class="doc-body"><div class="doc-name" title="' + esc(doc.filename) + '">' + esc(doc.filename) + "</div>" +
-      '<div class="doc-meta">' + meta + "</div></div>" +
-      '<button class="doc-del" aria-label="' + esc(t("kb.delete")) + '" title="' + esc(t("kb.delete")) + '">' +
-      '<svg width="13" height="13" viewBox="0 0 14 14" fill="none"><path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button>';
-    item.querySelector(".doc-del").addEventListener("click", async () => {
-      await api("/api/documents/" + doc.id, { method: "DELETE" });
-      loadDocuments();
-    });
-    list.appendChild(item);
-  }
+  state.libDocs = data.documents || [];
+  renderDocCount();
+  renderLibrary();
 }
 
+function renderDocCount() {
+  const counter = $("#doc-count");
+  const total = state.libDocs.length;
+  counter.hidden = total === 0;
+  if (!total) return;
+  const chunks = state.libDocs.reduce((n, d) => n + (d.num_chunks || 0), 0);
+  counter.textContent = t(total === 1 ? "kb.countOne" : "kb.count", { n: total, c: chunks });
+}
+
+function renderLibrary() {
+  const docs = libVisible();
+  state.libShown = docs;
+
+  // Selection only ever covers what is on screen: a search that hides half the
+  // grid must not leave a delete aimed at files you can no longer see.
+  const alive = new Set(docs.map((d) => d.id));
+  for (const id of [...state.libSel]) if (!alive.has(id)) state.libSel.delete(id);
+  if (state.libAnchor !== null && state.libAnchor >= docs.length) state.libAnchor = null;
+
+  const grid = $("#lib-grid");
+  grid.className = "lib-grid" + (state.libView === "list" ? " is-list" : "");
+  grid.innerHTML = docs.map(tileHTML).join("");
+
+  const empty = $("#lib-empty");
+  empty.classList.toggle("hidden", docs.length > 0);
+  if (!docs.length) {
+    // an empty library has no matches to miss — "nothing here yet" is the honest
+    // message even when a stale query is still sitting in the box
+    const q = state.libQuery.trim();
+    empty.innerHTML = q && state.libDocs.length
+      ? "<strong>" + esc(t("lib.noMatchTitle", { q })) + "</strong>" + esc(t("lib.noMatchHint"))
+      : "<strong>" + esc(t("lib.emptyTitle")) + "</strong>" + esc(t("lib.emptyHint"));
+  }
+
+  const total = state.libDocs.length;
+  if (!total) $("#lib-stat").textContent = "";
+  else if (state.libQuery.trim()) $("#lib-stat").textContent = t("lib.found", { n: docs.length, total });
+  else {
+    const chunks = state.libDocs.reduce((n, d) => n + (d.num_chunks || 0), 0);
+    $("#lib-stat").textContent = t(total === 1 ? "kb.countOne" : "kb.count", { n: total, c: chunks });
+  }
+
+  syncSelection();
+}
+
+function syncSelection() {
+  const n = state.libSel.size;
+  $("#lib-sel").classList.toggle("hidden", n === 0);
+  $("#lib-tools").classList.toggle("hidden", n > 0);
+  $("#lib-sel-n").textContent = n ? t("lib.selected", { n }) : "";
+  if (!n) state.libAnchor = null;
+
+  // tri-state: every visible file ticked reads as "checked", a part as "mixed"
+  const shown = state.libShown || [];
+  const picked = shown.filter((d) => state.libSel.has(d.id)).length;
+  const all = $("#lib-all");
+  all.checked = shown.length > 0 && picked === shown.length;
+  all.indeterminate = picked > 0 && picked < shown.length;
+
+  $("#lib-grid").querySelectorAll(".tile").forEach((tile) => {
+    const on = state.libSel.has(tile.dataset.id);
+    tile.classList.toggle("is-sel", on);
+    const box = tile.querySelector(".tile-input");
+    if (box) box.checked = on;
+  });
+}
+
+function setLibView(view, opts) {
+  state.libView = view === "list" ? "list" : "grid";
+  localStorage.setItem(LIB_VIEW_KEY, state.libView);
+  document.querySelectorAll("[data-lib-view]").forEach((btn) => {
+    const on = btn.dataset.libView === state.libView;
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-pressed", String(on));
+  });
+  if (!opts || opts.render !== false) renderLibrary();
+}
+
+/* ---------------- selection ---------------- */
+function selectAllVisible(on) {
+  const shown = state.libShown || [];
+  if (on) shown.forEach((d) => state.libSel.add(d.id));
+  else state.libSel.clear();
+  state.libAnchor = null;
+  syncSelection();
+}
+
+function selectRange(from, to) {
+  const shown = state.libShown || [];
+  if (from === null || from === undefined || !shown[from]) {
+    // no anchor yet (first shift-click): behave like a plain click on the target
+    const doc = shown[to];
+    if (doc) state.libSel.add(doc.id);
+    state.libAnchor = to;
+    syncSelection();
+    return;
+  }
+  const [a, b] = from <= to ? [from, to] : [to, from];
+  for (let i = a; i <= b; i++) state.libSel.add(shown[i].id);
+  state.libAnchor = to;
+  syncSelection();
+}
+
+const libGrid = $("#lib-grid");
+libGrid.addEventListener("click", (e) => {
+  const tile = e.target.closest(".tile");
+  if (!tile || !e.shiftKey) return;
+  e.preventDefault(); // the label would toggle just this one box
+  selectRange(state.libAnchor, Number(tile.dataset.idx));
+});
+libGrid.addEventListener("change", (e) => {
+  const box = e.target.closest(".tile-input");
+  if (!box) return;
+  if (box.checked) state.libSel.add(box.dataset.id); else state.libSel.delete(box.dataset.id);
+  state.libAnchor = Number(box.closest(".tile").dataset.idx);
+  syncSelection();
+});
+
+$("#lib-all").addEventListener("change", (e) => selectAllVisible(e.target.checked));
+$("#lib-clear").addEventListener("click", () => selectAllVisible(false));
+$("#lib-invert").addEventListener("click", () => {
+  (state.libShown || []).forEach((d) => {
+    if (state.libSel.has(d.id)) state.libSel.delete(d.id); else state.libSel.add(d.id);
+  });
+  state.libAnchor = null;
+  syncSelection();
+});
+
+/* ---------------- search, sort, view ---------------- */
+$("#lib-q").addEventListener("input", (e) => {
+  state.libQuery = e.target.value;
+  $("#lib-q-clear").classList.toggle("hidden", !state.libQuery);
+  renderLibrary();
+});
+$("#lib-q-clear").addEventListener("click", () => {
+  $("#lib-q").value = "";
+  state.libQuery = "";
+  $("#lib-q-clear").classList.add("hidden");
+  renderLibrary();
+  $("#lib-q").focus();
+});
+$("#lib-sort").addEventListener("change", (e) => {
+  state.libSort = e.target.value;
+  renderLibrary();
+});
+document.querySelectorAll("[data-lib-view]").forEach((btn) => {
+  btn.addEventListener("click", () => setLibView(btn.dataset.libView));
+});
+// the toggle must match the remembered view before the first paint of the grid
+setLibView(state.libView, { render: false });
+$("#lib-upload").addEventListener("click", () => $("#file-input").click());
+
+/* ---------------- confirm dialog ---------------- */
+let confirmResolve = null;
+
+function confirmDialog(title, desc, okLabel) {
+  $("#confirm-title").textContent = title;
+  $("#confirm-desc").textContent = desc;
+  $("#confirm-ok").textContent = okLabel || t("lib.delete");
+  $("#confirm-modal").classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  $("#confirm-ok").focus();
+  return new Promise((resolve) => { confirmResolve = resolve; });
+}
+
+function closeConfirm(result) {
+  if ($("#confirm-modal").classList.contains("hidden")) return;
+  $("#confirm-modal").classList.add("hidden");
+  document.body.classList.remove("modal-open");
+  const resolve = confirmResolve;
+  confirmResolve = null;
+  if (resolve) resolve(result);
+}
+
+$("#confirm-ok").addEventListener("click", () => closeConfirm(true));
+$("#confirm-cancel").addEventListener("click", () => closeConfirm(false));
+$("#confirm-modal").addEventListener("click", (e) => {
+  if (e.target === $("#confirm-modal")) closeConfirm(false);
+});
+
+/* ---------------- delete ---------------- */
+async function deleteSelected() {
+  const ids = [...state.libSel];
+  if (!ids.length) return;
+  const ok = await confirmDialog(
+    t(ids.length === 1 ? "lib.delOne" : "lib.delMany", { n: ids.length }),
+    t("lib.delDesc"),
+    t("lib.delete"),
+  );
+  if (!ok) return;
+  try {
+    await api("/api/documents/delete", { method: "POST", body: { ids } });
+    state.libSel.clear();
+    await loadDocuments();
+  } catch (ex) {
+    alert(ex.message);
+  }
+}
+$("#lib-delete").addEventListener("click", deleteSelected);
+
+document.addEventListener("keydown", (e) => {
+  if (!$("#confirm-modal").classList.contains("hidden")) {
+    if (e.key === "Escape") { e.preventDefault(); closeConfirm(false); }
+    return;
+  }
+  if (!$("#app-view").classList.contains("lib-open")) return;
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
+  if (e.key === "Escape") {
+    if (typing && e.target.id === "lib-q") {
+      $("#lib-q").value = "";
+      state.libQuery = "";
+      $("#lib-q-clear").classList.add("hidden");
+      renderLibrary();
+    } else if (state.libSel.size) {
+      selectAllVisible(false);
+      $("#lib-upload").focus();
+    }
+    return;
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a" && !typing) {
+    e.preventDefault(); // otherwise the browser selects every tile's text
+    selectAllVisible(true);
+    return;
+  }
+  if ((e.key === "Delete" || e.key === "Backspace") && !typing && state.libSel.size) {
+    e.preventDefault();
+    deleteSelected();
+  }
+});
+
+/* ---------------- upload ---------------- */
 const dropZone = $("#drop-zone");
 dropZone.addEventListener("click", () => $("#file-input").click());
 dropZone.addEventListener("keydown", (e) => {
@@ -917,26 +1200,104 @@ $("#file-input").addEventListener("change", (e) => {
   e.target.value = "";
 });
 
+/* the whole library is a drop target — aiming at a 264px box was the problem */
+function hasFiles(e) {
+  return !!e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files");
+}
+let dragDepth = 0;
+const libEl = $("#library");
+libEl.addEventListener("dragenter", (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  dragDepth += 1;
+  $("#lib-drop").classList.remove("hidden");
+});
+libEl.addEventListener("dragover", (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "copy";
+});
+libEl.addEventListener("dragleave", () => {
+  // dragleave also fires when crossing into a child element, hence the counter.
+  // No hasFiles() gate here: when the pointer leaves the window the event can
+  // arrive with an empty dataTransfer, and the overlay would stay up for good.
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) $("#lib-drop").classList.add("hidden");
+});
+libEl.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dragDepth = 0;
+  $("#lib-drop").classList.add("hidden");
+  if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
+});
+
+function showUpload(total) {
+  const panel = $("#up-panel");
+  if (state.uploadTimer) { clearTimeout(state.uploadTimer); state.uploadTimer = null; }
+  panel.classList.remove("hidden");
+  $("#up-fails").innerHTML = "";
+  $("#up-fill").style.width = "0%";
+  $("#up-label").textContent = t("lib.uploading", { done: 0, total });
+}
+
+function renderUploadFails(fails) {
+  const ul = $("#up-fails");
+  if (!fails.length) { ul.innerHTML = ""; return; }
+  const shown = fails.slice(0, 6).map((f) =>
+    "<li>" + esc(f.name) + (f.why ? ' <span>' + esc(f.why) + "</span>" : "") + "</li>").join("");
+  ul.innerHTML = shown + (fails.length > 6
+    ? "<li>… +" + (fails.length - 6) + "</li>" : "");
+}
+
+function hideUpload() {
+  $("#up-panel").classList.add("hidden");
+  if (state.uploadTimer) { clearTimeout(state.uploadTimer); state.uploadTimer = null; }
+}
+$("#up-close").addEventListener("click", hideUpload);
+
+/* Batched rather than one request per file: a hundred files in one request
+   gives no progress at all, a hundred requests flood the server. Eight at a
+   time is one round-trip per eight files and a bar that keeps moving. */
 async function uploadFiles(fileList) {
-  const fd = new FormData();
-  for (const f of fileList) fd.append("files", f);
-  dropZone.style.opacity = "0.5";
-  dropZone.style.pointerEvents = "none";
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  if (state.uploading) { $("#lib-stat").textContent = t("lib.busy"); return; }
+
+  state.uploading = true;
+  const fails = [];
+  let done = 0;
+  showUpload(files.length);
   try {
-    const data = await api("/api/documents", { method: "POST", body: fd });
-    const fails = data.results.filter((r) => !r.ok);
-    if (fails.length) {
-      alert(t("err.uploadSome", {
-        list: fails.map((f) => "• " + f.filename + ": " + f.error).join("\n"),
-      }));
+    for (let i = 0; i < files.length; i += UPLOAD_BATCH) {
+      const batch = files.slice(i, i + UPLOAD_BATCH);
+      const fd = new FormData();
+      batch.forEach((f) => fd.append("files", f));
+      try {
+        const data = await api("/api/documents", { method: "POST", body: fd });
+        (data.results || []).forEach((r) => {
+          if (!r.ok) fails.push({ name: r.filename, why: r.error });
+        });
+      } catch (ex) {
+        fails.push({ name: t("lib.uploadBatchFailed", { n: batch.length }), why: ex.message });
+      }
+      done = Math.min(files.length, i + batch.length);
+      $("#up-label").textContent = t("lib.uploading", { done, total: files.length });
+      $("#up-fill").style.width = Math.round((done / files.length) * 100) + "%";
+      renderUploadFails(fails);
     }
-  } catch (ex) {
-    alert(t("err.upload", { msg: ex.message }));
   } finally {
-    dropZone.style.opacity = "";
-    dropZone.style.pointerEvents = "";
-    await loadDocuments();
+    state.uploading = false;
   }
+
+  const okCount = files.length - fails.length;
+  $("#up-label").textContent = fails.length
+    ? t("lib.uploadSome", { ok: okCount, n: fails.length })
+    : t("lib.uploadDone", { n: files.length });
+  $("#up-fill").style.width = "100%";
+  renderUploadFails(fails);
+  if (!fails.length) state.uploadTimer = setTimeout(hideUpload, 4000);
+
+  await loadDocuments();
 }
 
 /* ---------------- chat rendering ---------------- */

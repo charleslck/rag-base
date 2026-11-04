@@ -178,6 +178,28 @@ def delete_document(doc_id: str, user: dict = Depends(auth.current_user)):
     return {"ok": True}
 
 
+class BulkDeleteIn(BaseModel):
+    ids: list[str] = Field(default_factory=list)
+
+
+@app.post("/api/documents/delete")
+def delete_documents(body: BulkDeleteIn, user: dict = Depends(auth.current_user)):
+    """Batch delete for the file library.
+
+    POST rather than DELETE-with-body: proxies and some HTTP clients drop the
+    payload of a DELETE request, and a silently empty body would look like a
+    successful no-op.
+    """
+    ids = [d for d in dict.fromkeys(body.ids) if d]
+    if not ids:
+        raise HTTPException(400, "No document ids given")
+    # SQLite caps host parameters per statement; the library never selects more
+    # than a screenful anyway, so a hard ceiling keeps a crafted body harmless.
+    if len(ids) > 500:
+        raise HTTPException(400, "Too many documents in one request (max 500)")
+    return {"deleted": db.delete_documents(ids, user["id"]), "requested": len(ids)}
+
+
 # ---------------------------------------------------------------- conversations
 
 @app.get("/api/conversations")

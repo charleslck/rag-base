@@ -290,6 +290,25 @@ def delete_document(doc_id: str, user_id: str) -> bool:
     return cur.rowcount > 0
 
 
+def delete_documents(doc_ids, user_id: str) -> int:
+    """Delete several documents in one transaction, returns how many went.
+
+    Chunks and embeddings follow through the foreign-key cascade, so a hundred
+    deletes cost one statement instead of a hundred connections and commits.
+    Ids the caller does not own simply do not match — no error, no leak.
+    """
+    ids = [d for d in dict.fromkeys(doc_ids) if d]
+    if not ids:
+        return 0
+    conn = get_conn()
+    cur = conn.execute(
+        f"DELETE FROM documents WHERE user_id = ? AND id IN ({','.join('?' * len(ids))})",
+        [user_id, *ids],
+    )
+    conn.commit()
+    return cur.rowcount
+
+
 def all_chunk_vectors(user_id: str, doc_ids=None):
     """Return (chunk_rows, matrix) for cosine search.
 

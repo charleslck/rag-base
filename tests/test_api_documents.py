@@ -183,6 +183,65 @@ def test_delete_requires_authentication(client, user):
     assert client.delete(f"/api/documents/{doc_id}").status_code == 401
 
 
+# --------------------------------------------------------------- bulk delete
+
+def test_bulk_delete_clears_a_whole_selection_in_one_request(client, user):
+    ids = [
+        r["id"]
+        for r in upload(
+            client,
+            user["headers"],
+            ("a.txt", b"Alpha content about refunds."),
+            ("b.txt", b"Beta content about shipping."),
+            ("c.txt", b"Gamma content about warranty."),
+        ).json()["results"]
+    ]
+
+    resp = client.post("/api/documents/delete", json={"ids": ids[:2]}, headers=user["headers"])
+
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": 2, "requested": 2}
+    left = client.get("/api/documents", headers=user["headers"]).json()["documents"]
+    assert [d["id"] for d in left] == [ids[2]]
+
+
+def test_bulk_delete_takes_the_chunks_and_vectors_with_it(client, user):
+    """Orphaned chunks stay searchable, so a delete that misses them is worse
+    than a delete that fails."""
+    from app import database as db
+
+    doc_id = upload(client, user["headers"], ("faq.txt", FAQ_TEXT.encode())).json()["results"][0]["id"]
+    uid = db.get_user_by_email("user@example.com")["id"]
+    assert len(db.all_chunk_vectors(uid)[0]) > 0
+
+    client.post("/api/documents/delete", json={"ids": [doc_id]}, headers=user["headers"])
+
+    assert db.all_chunk_vectors(uid)[0] == []
+    assert db.get_conn().execute("SELECT COUNT(*) c FROM embeddings").fetchone()["c"] == 0
+
+
+def test_bulk_delete_ignores_ids_that_are_not_yours(client, admin, user):
+    """A crafted body must not become a way to probe other accounts."""
+    foreign = upload(client, admin["headers"], ("private.txt", b"Admin only.")).json()["results"][0]["id"]
+    mine = upload(client, user["headers"], ("mine.txt", b"My own document.")).json()["results"][0]["id"]
+
+    resp = client.post("/api/documents/delete", json={"ids": [foreign, mine, "nope"]}, headers=user["headers"])
+
+    assert resp.json() == {"deleted": 1, "requested": 3}
+    assert len(client.get("/api/documents", headers=admin["headers"]).json()["documents"]) == 1
+
+
+def test_bulk_delete_needs_at_least_one_id(client, user):
+    resp = client.post("/api/documents/delete", json={"ids": []}, headers=user["headers"])
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "No document ids given"
+
+
+def test_bulk_delete_requires_authentication(client, user):
+    doc_id = upload(client, user["headers"], ("faq.txt", b"body")).json()["results"][0]["id"]
+    assert client.post("/api/documents/delete", json={"ids": [doc_id]}).status_code == 401
+
+
 # ---------------------------------------------------------------- isolation
 
 def test_users_cannot_see_or_delete_other_users_documents(client, admin, user):

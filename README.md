@@ -24,6 +24,9 @@ No vector database. No build step. One process, one SQLite file.
   becomes admin; admins can reset any user's password.
 - 📄 **Document ingestion** — PDF, DOCX, TXT, Markdown, HTML. Smart chunking with overlap,
   per-user quotas and upload-size limits.
+- 🗂️ **File library** — the knowledge base is a gallery, not a list: grid or list view,
+  search, sort, multi-select (shift-range, ⌘A, invert) and batch delete in one request.
+  See [File library](#file-library).
 - 🧠 **Hybrid retrieval** — vector embeddings fused with **BM25 lexical search via RRF**
   (Reciprocal Rank Fusion). Precise on keywords, robust on semantics. Per-document
   diversity caps and relevance thresholding keep answers on-topic.
@@ -96,6 +99,31 @@ embedding API are unaffected (the provider owns the model).
 **Answers** — the system prompt pins the reply language to the question's language while
 keeping `[1]` citation markers intact; demo-mode fallbacks are bilingual; SSE streams
 Chinese in small slices so it types out visibly instead of appearing in one dump.
+
+## File library
+
+A hundred files is a normal size for a knowledge base, and a hundred one-at-a-time deletes
+is not. The old rail was a 264px column of rows with an × on each — fine for ten files,
+unusable at fifty.
+
+- **Grid or list** — six columns of tiles on a desktop, two on a phone. The list view trades
+  the preview for aligned name / chunks / date columns. The choice is remembered per browser.
+- **Selection** — click a tile, shift-click for a range, `⌘A` for everything, invert to flip
+  the set, `Esc` to clear. The count follows the *filtered* grid: a search never leaves a
+  delete aimed at a file you can no longer see.
+- **Batch delete** — one confirmation, one request:
+
+  ```http
+  POST /api/documents/delete
+  {"ids": ["doc_1", "doc_2"]}   →   {"deleted": 2, "requested": 2}
+  ```
+
+  Chunks and embeddings follow through the foreign-key cascade, so nothing is left behind
+  that retrieval could still find. Ids you do not own simply do not match — a crafted body
+  cannot be used to probe another account.
+- **Upload with progress** — drop anywhere in the library, not on a small box. Files go up
+  in batches of eight and the panel reports `12 / 100` with a per-file failure list, instead
+  of greying the area out and hoping.
 
 ## Large knowledge bases
 

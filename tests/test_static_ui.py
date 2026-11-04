@@ -81,8 +81,57 @@ def test_knowledge_base_shows_how_many_documents_it_holds():
     app = (STATIC / "app.js").read_text(encoding="utf-8")
     js = (STATIC / "i18n.js").read_text(encoding="utf-8")
 
-    assert 'id="doc-count"' in html
-    assert html.index('id="doc-count"') < html.index('id="doc-list"')
-    assert 'counter.hidden = true' in app  # nothing to count on an empty base
+    assert 'id="doc-count"' in html  # the rail summary
+    assert 'id="lib-stat"' in html  # the same numbers above the gallery
+    assert "renderDocCount()" in app
+    assert "counter.hidden = total === 0" in app  # nothing to count on an empty base
     assert len(re.findall(r'"kb\.count":', js)) == 2
     assert len(re.findall(r'"kb\.countOne":', js)) == 2
+
+
+def test_file_library_replaces_one_x_per_row_with_bulk_selection():
+    """The gallery is the fix for "deleting a hundred files is a hundred clicks".
+
+    What is asserted here is the contract the behaviour depends on — an id that
+    goes missing, or a handler bound to a click on a div instead of a real
+    checkbox, fails silently in the browser.
+    """
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    app = (STATIC / "app.js").read_text(encoding="utf-8")
+    css = (STATIC / "styles.css").read_text(encoding="utf-8")
+
+    for hook in (
+        "library", "lib-grid", "lib-stat", "lib-tools", "lib-sel",
+        "lib-all", "lib-invert", "lib-delete", "lib-clear",
+        "lib-q", "lib-sort", "lib-upload", "lib-empty",
+        "up-panel", "up-fill", "up-fails", "confirm-modal",
+    ):
+        assert f'id="{hook}"' in html, hook
+
+    # the gallery takes over the chat area, so it lives beside it in the shell
+    assert html.index('id="chat-main"') < html.index('id="library"')
+    assert 'data-lib-view="grid"' in html and 'data-lib-view="list"' in html
+
+    # a real checkbox per tile: keyboard, screen readers and shift-ranges all
+    # depend on it; a click handler on a div would give up all three
+    assert 'class="tile-input"' in app
+    assert 'libGrid.addEventListener("change"' in app
+    assert "selectRange(state.libAnchor" in app
+    assert "all.indeterminate =" in app  # header box shows the mixed state
+
+    # one request for the whole selection, and never without a confirmation
+    assert '"/api/documents/delete"' in app
+    assert "await confirmDialog(" in app
+    assert 'id="confirm-ok"' in html
+
+    # uploads report movement instead of greying the drop zone out
+    assert "function showUpload(" in app
+    assert 't("lib.uploading"' in app
+    assert "UPLOAD_BATCH" in app
+
+    # and the whole area accepts a drop, not just the 264px box in the rail
+    assert 'libEl.addEventListener("drop"' in app
+
+    for selector in (".lib-grid", ".tile.is-sel", ".lib-grid.is-list", ".lib-drop"):
+        assert selector in css, selector
+

@@ -73,8 +73,8 @@
         <span data-i18n="nav.newChat">New chat</span>
       </button>
       <nav class="side-tabs" role="tablist">
-        <button class="side-tab active" id="tab-chats" role="tab" data-i18n="nav.tabChats">Chats</button>
-        <button class="side-tab" id="tab-kb" role="tab" data-i18n="nav.tabKb">Knowledge base</button>
+        <button class="side-tab active" id="tab-chats" role="tab" aria-selected="true" aria-controls="pane-chats" data-i18n="nav.tabChats">Chats</button>
+        <button class="side-tab" id="tab-kb" role="tab" aria-selected="false" aria-controls="pane-kb" data-i18n="nav.tabKb">Knowledge base</button>
       </nav>
 
       <div class="side-pane" id="pane-chats">
@@ -89,7 +89,7 @@
           <input type="file" id="file-input" multiple accept=".pdf,.docx,.txt,.md,.markdown,.html,.htm" hidden />
         </div>
         <div class="doc-count" id="doc-count" hidden></div>
-        <div class="doc-list" id="doc-list"></div>
+        <p class="kb-hint" data-i18n="kb.hint">Searching, multi-select and bulk delete live in the file library on the right.</p>
       </div>
 
       <div class="sidebar-foot">
@@ -102,7 +102,7 @@
     <div class="sidebar-backdrop hidden" id="sidebar-backdrop"></div>
 
     <!-- Chat -->
-    <main class="chat-main">
+    <main class="chat-main" id="chat-main">
       <div class="messages" id="messages"></div>
       <div class="composer-wrap">
         <form class="composer" id="composer">
@@ -112,6 +112,82 @@
           </button>
         </form>
         <p class="composer-hint" data-i18n="chat.hint">Answers cite the uploaded knowledge base. Verify important information.</p>
+      </div>
+    </main>
+
+    <!-- ============ File library (takes over the chat area) ============ -->
+    <main class="library-main" id="library">
+      <header class="lib-head">
+        <div class="lib-title">
+          <h1 id="lib-title" data-i18n="lib.title">File library</h1>
+          <p class="lib-stat" id="lib-stat"></p>
+        </div>
+
+        <!-- selection mode: only the things you can do with a selection -->
+        <div class="lib-sel hidden" id="lib-sel">
+          <label class="lib-sel-all">
+            <input type="checkbox" id="lib-all" />
+            <span data-i18n="lib.selectAll">Select all</span>
+          </label>
+          <span class="lib-sel-n" id="lib-sel-n" aria-live="polite"></span>
+          <button class="lib-act" id="lib-invert" type="button" data-i18n="lib.invert">Invert</button>
+          <button class="lib-act lib-act--danger" id="lib-delete" type="button" data-i18n="lib.delete">Delete</button>
+          <button class="lib-act" id="lib-clear" type="button" data-i18n="lib.clear">Cancel</button>
+        </div>
+
+        <div class="lib-tools" id="lib-tools">
+          <label class="lib-search">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.6" stroke="currentColor" stroke-width="1.6"/><path d="M10.6 10.6L14 14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            <input type="search" id="lib-q" autocomplete="off" data-i18n-ph="lib.search" placeholder="Search by file name" />
+            <button class="lib-q-clear hidden" id="lib-q-clear" type="button" data-i18n-title="lib.searchClear">
+              <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+            </button>
+          </label>
+          <select class="lib-sort" id="lib-sort" data-i18n-title="lib.sortAria">
+            <option value="new" data-i18n="lib.sortNew">Newest first</option>
+            <option value="old" data-i18n="lib.sortOld">Oldest first</option>
+            <option value="az" data-i18n="lib.sortAz">Name A→Z</option>
+            <option value="za" data-i18n="lib.sortZa">Name Z→A</option>
+            <option value="chunks" data-i18n="lib.sortChunks">Most chunks</option>
+          </select>
+          <div class="lib-views" role="group" data-i18n-title="lib.viewAria">
+            <button class="lib-view active" type="button" data-lib-view="grid" aria-pressed="true" data-i18n-title="lib.viewGrid">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="2" y="2" width="5" height="5" rx="1.2" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="2" width="5" height="5" rx="1.2" stroke="currentColor" stroke-width="1.5"/><rect x="2" y="9" width="5" height="5" rx="1.2" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="9" width="5" height="5" rx="1.2" stroke="currentColor" stroke-width="1.5"/></svg>
+            </button>
+            <button class="lib-view" type="button" data-lib-view="list" aria-pressed="false" data-i18n-title="lib.viewList">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            </button>
+          </div>
+          <button class="btn-primary lib-upload" id="lib-upload" type="button">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 11V2.5m0 0L5 5.5m3-3l3 3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 10.5v2a1.5 1.5 0 001.5 1.5h8a1.5 1.5 0 001.5-1.5v-2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+            <span data-i18n="lib.upload">Upload</span>
+          </button>
+        </div>
+      </header>
+
+      <div class="lib-body" id="lib-body">
+        <div class="lib-grid" id="lib-grid" role="group" data-i18n-title="lib.gridAria"></div>
+        <div class="lib-empty hidden" id="lib-empty"></div>
+      </div>
+
+      <!-- dropped-file overlay: the whole area is a target, not a small box -->
+      <div class="lib-drop hidden" id="lib-drop" aria-hidden="true">
+        <div class="lib-drop-in">
+          <svg width="30" height="30" viewBox="0 0 24 24" fill="none"><path d="M12 16V4m0 0l-4 4m4-4l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          <strong id="lib-drop-text" data-i18n="lib.drop"></strong>
+        </div>
+      </div>
+
+      <!-- upload progress: a hundred files need to show movement, not a spinner -->
+      <div class="up-panel hidden" id="up-panel" role="status" aria-live="polite">
+        <div class="up-head">
+          <span id="up-label"></span>
+          <button class="up-close" id="up-close" type="button" data-i18n-title="lib.dismiss">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+        <div class="up-bar"><i id="up-fill"></i></div>
+        <ul class="up-fails" id="up-fails"></ul>
       </div>
     </main>
 
@@ -397,6 +473,22 @@
           </aside>
         </div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Confirm dialog (bulk delete) ============ -->
+<div class="modal-backdrop hidden" id="confirm-modal">
+  <div class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-desc">
+    <div class="modal-head">
+      <h3 id="confirm-title"></h3>
+    </div>
+    <div class="modal-body">
+      <p class="dim" id="confirm-desc"></p>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-secondary" id="confirm-cancel" type="button" data-i18n="lib.cancel">Cancel</button>
+      <button class="btn-danger" id="confirm-ok" type="button" data-i18n="lib.delete">Delete</button>
     </div>
   </div>
 </div>
