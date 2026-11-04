@@ -18,23 +18,26 @@
       </svg>
       <span>RAGbase</span>
     </div>
-    <h1 id="auth-title">Welcome back</h1>
-    <p class="auth-sub" id="auth-sub">Sign in to chat with your knowledge base.</p>
+    <h1 id="auth-title" data-i18n="auth.login.title">Welcome back</h1>
+    <p class="auth-sub" id="auth-sub" data-i18n="auth.login.sub">Sign in to chat with your knowledge base.</p>
     <form id="auth-form" novalidate>
       <label class="field">
-        <span>Email</span>
-        <input type="email" id="auth-email" autocomplete="email" required placeholder="you@company.com" />
+        <span data-i18n="auth.email">Email</span>
+        <input type="email" id="auth-email" autocomplete="email" required data-i18n-ph="auth.email.ph" placeholder="you@company.com" />
       </label>
       <label class="field">
-        <span>Password</span>
-        <input type="password" id="auth-password" autocomplete="current-password" required placeholder="6+ characters" />
+        <span data-i18n="auth.password">Password</span>
+        <input type="password" id="auth-password" autocomplete="current-password" required data-i18n-ph="auth.password.ph" placeholder="6+ characters" />
       </label>
       <p class="form-error hidden" id="auth-error"></p>
-      <button type="submit" class="btn-primary" id="auth-submit">Sign in</button>
+      <button type="submit" class="btn-primary" id="auth-submit" data-i18n="auth.login.submit">Sign in</button>
     </form>
     <p class="auth-switch">
-      <span id="auth-switch-text">No account yet?</span>
-      <button type="button" class="link-btn" id="auth-switch-btn">Create one</button>
+      <span id="auth-switch-text" data-i18n="auth.noAccount">No account yet?</span>
+      <button type="button" class="link-btn" id="auth-switch-btn" data-i18n="auth.createOne">Create one</button>
+    </p>
+    <p class="auth-lang">
+      <button type="button" class="link-btn" id="auth-lang-btn" data-i18n-title="lang.switch"><span id="auth-lang-label">中文</span></button>
     </p>
   </div>
 </div>
@@ -44,17 +47,20 @@
   <div id="demo-banner" class="demo-banner hidden"></div>
 
   <header class="topbar">
-    <button class="icon-btn" id="menu-btn" aria-label="Toggle sidebar">
+    <button class="icon-btn" id="menu-btn" data-i18n-title="nav.toggleSidebar">
       <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
     </button>
     <div class="topbar-brand">RAGbase</div>
     <div class="topbar-right">
-      <button class="icon-btn" id="sources-toggle" aria-label="Toggle sources panel" title="Sources">
+      <button class="icon-btn lang-btn" id="lang-btn" type="button" data-i18n-title="lang.switch">
+        <span id="lang-label">中文</span>
+      </button>
+      <button class="icon-btn" id="sources-toggle" data-i18n-title="nav.sources">
         <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M4 4h12v12H4z" stroke="currentColor" stroke-width="1.6"/><path d="M7 8h6M7 11h6M7 14h4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
       </button>
       <div class="user-chip">
         <span id="user-email"></span>
-        <button class="link-btn" id="logout-btn">Sign out</button>
+        <button class="link-btn" id="logout-btn" data-i18n="nav.signOut">Sign out</button>
       </div>
     </div>
   </header>
@@ -64,11 +70,11 @@
     <aside class="sidebar" id="sidebar">
       <button class="btn-primary btn-new-chat" id="new-chat-btn">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-        New chat
+        <span data-i18n="nav.newChat">New chat</span>
       </button>
       <nav class="side-tabs" role="tablist">
-        <button class="side-tab active" id="tab-chats" role="tab">Chats</button>
-        <button class="side-tab" id="tab-kb" role="tab">Knowledge base</button>
+        <button class="side-tab active" id="tab-chats" role="tab" data-i18n="nav.tabChats">Chats</button>
+        <button class="side-tab" id="tab-kb" role="tab" data-i18n="nav.tabKb">Knowledge base</button>
       </nav>
 
       <div class="side-pane" id="pane-chats">
@@ -77,26 +83,26 @@
 
       <div class="side-pane hidden" id="pane-int">
         <div class="int-head">
-          <button class="icon-btn int-back" id="int-back" aria-label="Back">
+          <button class="icon-btn int-back" id="int-back" data-i18n-title="int.back">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 3L5 8l5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
-          <h3>Integration &amp; API</h3>
+          <h3 data-i18n="int.title">Integration &amp; API</h3>
         </div>
         <div class="int-section">
-          <h3>Embed in your website</h3>
-          <p class="dim">Paste this snippet into any page — a chat window connected to your knowledge base appears in the corner.</p>
-          <textarea id="embed-code" readonly rows="7" aria-label="Embed code"></textarea>
-          <button class="btn-secondary" id="copy-embed" type="button">Copy snippet</button>
+          <h3 data-i18n="int.embed.title">Embed in your website</h3>
+          <p class="dim" data-i18n="int.embed.desc">Paste this snippet into any page — a chat window connected to your knowledge base appears in the corner.</p>
+          <textarea id="embed-code" readonly rows="7" data-i18n-title="int.embed.title"></textarea>
+          <button class="btn-secondary" id="copy-embed" type="button" data-i18n="int.embed.copy">Copy snippet</button>
         </div>
         <div class="int-section">
-          <h3>API keys</h3>
-          <p class="dim">Used by the embed and server-to-server integrations. A key can only chat — it cannot manage documents or users.</p>
+          <h3 data-i18n="int.keys.title">API keys</h3>
+          <p class="dim" data-i18n="int.keys.desc">Used by the embed and server-to-server integrations. A key can only chat — it cannot manage documents or users.</p>
           <form id="key-form">
-            <input type="text" id="key-label" placeholder="Label (e.g. company site)" aria-label="Key label" />
-            <button type="submit" class="btn-primary btn-small">Create key</button>
+            <input type="text" id="key-label" data-i18n-ph="int.keys.labelPh" data-i18n-title="int.keys.labelPh" placeholder="Label (e.g. company site)" />
+            <button type="submit" class="btn-primary btn-small" data-i18n="int.keys.create">Create key</button>
           </form>
           <div id="new-key-box" class="new-key-box hidden">
-            <p><strong>Copy it now — it won't be shown again:</strong></p>
+            <p><strong data-i18n="int.keys.once">Copy it now — it won't be shown again:</strong></p>
             <code id="new-key-value"></code>
           </div>
           <div class="key-list" id="key-list"></div>
@@ -104,19 +110,19 @@
       </div>
 
       <div class="side-pane hidden" id="pane-kb">
-        <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-label="Upload documents">
+        <div id="drop-zone" class="drop-zone" tabindex="0" role="button" data-i18n-title="kb.uploadAria">
           <svg width="26" height="26" viewBox="0 0 24 24" fill="none"><path d="M12 16V4m0 0l-4 4m4-4l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-          <p><strong>Drop documents here</strong></p>
-          <p class="dim">or click to browse · PDF, DOCX, TXT, MD, HTML</p>
+          <p><strong data-i18n="kb.drop">Drop documents here</strong></p>
+          <p class="dim" data-i18n="kb.dropHint">or click to browse · PDF, DOCX, TXT, MD, HTML</p>
           <input type="file" id="file-input" multiple accept=".pdf,.docx,.txt,.md,.markdown,.html,.htm" hidden />
         </div>
         <div class="doc-list" id="doc-list"></div>
       </div>
 
       <div class="sidebar-foot">
-        <button class="settings-btn" id="settings-btn" aria-label="Integration settings" title="Integration & API settings">
+        <button class="settings-btn" id="settings-btn" data-i18n-title="int.title">
           <svg width="17" height="17" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="3" stroke="currentColor" stroke-width="1.6"/><path d="M10 2v2.5M10 15.5V18M2 10h2.5M15.5 10H18M4.3 4.3l1.8 1.8M13.9 13.9l1.8 1.8M15.7 4.3l-1.8 1.8M6.1 13.9l-1.8 1.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-          <span>Integrate</span>
+          <span data-i18n="nav.integrate">Integrate</span>
         </button>
       </div>
     </aside>
@@ -127,30 +133,31 @@
       <div class="messages" id="messages"></div>
       <div class="composer-wrap">
         <form class="composer" id="composer">
-          <textarea id="chat-input" rows="1" placeholder="Ask anything about your documents…"></textarea>
-          <button type="submit" class="send-btn" id="send-btn" aria-label="Send">
+          <textarea id="chat-input" rows="1" data-i18n-ph="chat.placeholder" placeholder="Ask anything about your documents…"></textarea>
+          <button type="submit" class="send-btn" id="send-btn" data-i18n-title="chat.send">
             <svg width="18" height="18" viewBox="0 0 20 20" fill="none"><path d="M3 10L17 3l-4 7 4 7-14-7zm0 0h10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
         </form>
-        <p class="composer-hint">Answers cite the uploaded knowledge base. Verify important information.</p>
+        <p class="composer-hint" data-i18n="chat.hint">Answers cite the uploaded knowledge base. Verify important information.</p>
       </div>
     </main>
 
     <!-- Sources panel -->
     <aside class="sources-panel hidden" id="sources-panel">
       <div class="sources-head">
-        <h2>Sources</h2>
-        <button class="icon-btn" id="sources-close" aria-label="Close sources panel">
+        <h2 data-i18n="sources.title">Sources</h2>
+        <button class="icon-btn" id="sources-close" data-i18n-title="sources.close">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         </button>
       </div>
       <div class="sources-list" id="sources-list">
-        <p class="dim sources-empty">Cited sources will appear here after the assistant answers.</p>
+        <p class="dim sources-empty" data-i18n="sources.empty">Cited sources will appear here after the assistant answers.</p>
       </div>
     </aside>
   </div>
 </div>
 
+<script src="/static/i18n.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

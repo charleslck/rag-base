@@ -28,14 +28,37 @@ _stopwords = set(
 )
 
 
-_CJK_RE = re.compile(r"[一-鿿]+")
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]+")
+_CJK_CHAR_RE = re.compile(r"[\u4e00-\u9fff]")
+
+# Bump whenever _tokens changes its output: stored demo vectors are keyed by
+# token hash, so they must be rebuilt after a tokenizer change.
+TOKENIZER_VERSION = 2
+
+
+def has_cjk(text: str) -> bool:
+    """True when the text contains at least one Chinese character."""
+    return bool(_CJK_CHAR_RE.search(text or ""))
+
+
+def _cjk_tokens(run: str) -> list[str]:
+    """Character bigrams for a CJK run ("退款政策" -> 退款/款政/政策).
+
+    Chinese has no spaces, so word-level splitting is unavailable without a
+    dictionary. Unigrams lose all precision (any 款 matches), whereas bigrams
+    carry most of the signal: 退款 no longer collides with 汇款 or 条款.
+    Single-character runs stay as-is so "税" still works.
+    """
+    if len(run) == 1:
+        return [run]
+    return [run[i : i + 2] for i in range(len(run) - 1)]
 
 
 def _tokens(text: str) -> list[str]:
-    """Latin words (minus stopwords) + CJK unigrams — works for EN and ZH text."""
+    """Latin words (minus stopwords) + CJK bigrams — works for EN and ZH text."""
     out = []
     for m in _CJK_RE.finditer(text):
-        out.extend(m.group(0))
+        out.extend(_cjk_tokens(m.group(0)))
     for t in re.findall(r"[a-z0-9]+", text.lower()):
         if t not in _stopwords and len(t) > 1:
             out.append(t)
@@ -61,7 +84,11 @@ class DemoEmbedding:
 
 
 class DemoChat:
-    """Extractive answers from retrieved chunks — offline demo engine."""
+    """Extractive answers from retrieved chunks — offline demo engine.
+
+    All user-facing strings are bilingual so a Chinese deployment never falls
+    back to English boilerplate.
+    """
 
     @staticmethod
     def _stemmed(text: str) -> set[str]:
@@ -69,15 +96,21 @@ class DemoChat:
         return {t[:-1] if t.endswith("s") and len(t) > 3 else t for t in _tokens(text)}
 
     def answer(self, question: str, contexts: list[dict]) -> str:
+        zh = has_cjk(question)
         qtoks = self._stemmed(question)
         if not qtoks:
-            return "Please ask a question about the documents in your knowledge base."
+            return "请就知识库中的文档提问。" if zh else "Please ask a question about the documents in your knowledge base."
         best: list[tuple[float, str]] = []
         for ctx in contexts:
-            sentences = re.split(r"(?<=[.!?。！？])\s+", ctx["content"].replace("\n", " "))
+            body = ctx["content"].replace("\n", " ")
+            # CJK sentences often end without a following space, so split on the
+            # terminator itself rather than requiring whitespace after it
+            sentences = re.split(r"(?<=[。！？；])|(?<=[.!?])\s+", body)
             for sent in sentences:
                 clean = re.sub(r"[#>*`]", "", sent).strip()
-                if len(clean) < 25:
+                # Chinese carries more meaning per character: 12 chars is already
+                # a full sentence, while 25 latin chars is roughly the equivalent
+                if len(clean) < (12 if has_cjk(clean) else 25):
                     continue
                 stoks = self._stemmed(clean)
                 if not stoks:
@@ -97,15 +130,41 @@ class DemoChat:
                 break
         if not picked:
             return (
-                "I could not find anything relevant to that in the uploaded documents. "
+                "在所上传的文档中找不到与该问题相关的内容。可以换个说法提问，或先把相关文档加入知识库。"
+                if zh
+                else "I could not find anything relevant to that in the uploaded documents. "
                 "Try rephrasing, or add documents that cover this topic to the knowledge base."
             )
-        return "Based on your knowledge base:\n\n" + "\n\n".join(f"• {s}" for s in picked)
+        head = "根据你的知识库：" if zh else "Based on your knowledge base:"
+        return head + "\n\n" + "\n\n".join(f"• {s}" for s in picked)
 
     def stream(self, text: str):
-        for word in text.split(" "):
-            yield word + " "
-            time.sleep(0.012)
+        """Yield small slices so Chinese text streams visibly (no spaces to split on)."""
+        i, n = 0, len(text)
+        while i < n:
+            ch = text[i]
+            if _CJK_CHAR_RE.match(ch):
+                j = i
+                while j < n and _CJK_CHAR_RE.match(text[j]):
+                    j += 1
+                run = text[i:j]
+                for k in range(0, len(run), 3):
+                    yield run[k : k + 3]
+                    time.sleep(0.012)
+                i = j
+            elif ch.isalnum():
+                j = i
+                while j < n and (text[j].isalnum() or text[j] in "_-"):
+                    j += 1
+                yield text[i:j]
+                time.sleep(0.012)
+                i = j
+            else:
+                j = i
+                while j < n and not text[j].isalnum() and not _CJK_CHAR_RE.match(text[j]):
+                    j += 1
+                yield text[i:j]
+                i = j
 
 
 _openai_client = None
@@ -142,6 +201,42 @@ def embed_texts(texts: list[str]) -> np.ndarray:
     norms = np.linalg.norm(vecs, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
     return vecs / norms
+
+
+def ensure_vector_compatibility() -> int:
+    """Rebuild locally-hashed vectors when the tokenizer changed.
+
+    Real embedding APIs are version-independent (the provider owns the model),
+    but demo vectors hash our own tokens, so a tokenizer change silently
+    invalidates every stored vector. Runs once per version and is a no-op for
+    an empty knowledge base.
+
+    Returns the number of chunks re-embedded.
+    """
+    if not settings.embedding_local:
+        return 0
+    from . import database as db  # local import: avoids an import cycle
+
+    version = str(TOKENIZER_VERSION)
+    if db.get_meta("tokenizer_version") == version:
+        return 0
+
+    conn = db.get_conn()
+    rows = conn.execute("SELECT id, content FROM chunks ORDER BY id").fetchall()
+    total = 0
+    batch = 200
+    for start in range(0, len(rows), batch):
+        window = rows[start : start + batch]
+        vecs = DemoEmbedding().embed([r["content"] for r in window])
+        conn.executemany(
+            "INSERT INTO embeddings (chunk_id, vector) VALUES (?,?) "
+            "ON CONFLICT(chunk_id) DO UPDATE SET vector = excluded.vector",
+            [(r["id"], db.vec_to_blob(v)) for r, v in zip(window, vecs)],
+        )
+        conn.commit()
+        total += len(window)
+    db.set_meta("tokenizer_version", version)
+    return total
 
 
 def chat_once(messages: list[dict], contexts: list[dict] | None = None) -> str:

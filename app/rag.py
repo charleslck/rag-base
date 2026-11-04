@@ -41,7 +41,10 @@ SYSTEM_PROMPT = (
     "2. Cite every claim with the context number in square brackets, e.g. [1], [2].\n"
     "3. If the context does not contain the answer, say exactly that the "
     "knowledge base does not cover it, and suggest what to upload.\n"
-    "4. Be concise and well structured."
+    "4. Be concise and well structured.\n"
+    "5. Always reply in the same language as the user's question: Chinese "
+    "question → Chinese answer (简体中文), English question → English answer. "
+    "Keep the [1] citation markers unchanged in any language."
 )
 
 

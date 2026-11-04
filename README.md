@@ -2,6 +2,8 @@
 
 **Chat with your documents. Every answer cites its sources.**
 
+[English](README.md) · [简体中文](README.zh-CN.md)
+
 RAGbase is a production-ready, self-hosted **RAG (retrieval-augmented generation)** web app.
 Upload PDFs, DOCX, Markdown and more — then ask questions in natural language and get
 streaming AI answers grounded **only in your knowledge base**, with numbered citations
@@ -11,7 +13,7 @@ No vector database. No build step. One process, one SQLite file.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![Tests](https://img.shields.io/badge/tests-321%20passing-brightgreen)](#tests)
+[![Tests](https://img.shields.io/badge/tests-326%20passing-brightgreen)](#tests)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ![RAGbase chat with citations](docs/1_chat_with_citations.png)
@@ -25,6 +27,9 @@ No vector database. No build step. One process, one SQLite file.
 - 🧠 **Hybrid retrieval** — vector embeddings fused with **BM25 lexical search via RRF**
   (Reciprocal Rank Fusion). Precise on keywords, robust on semantics. Per-document
   diversity caps and relevance thresholding keep answers on-topic.
+- 🀄 **Chinese-first** — bilingual UI (zh/en, follows the browser language) and CJK
+  **bigram** indexing, so 退款 no longer collides with 汇款 or 条款. See
+  [Chinese support](#chinese-support).
 - 💬 **Streaming chat** — token-by-token answers over SSE, per-user conversation history.
 - 🎯 **Source citations** — numbered chips in every answer plus a relevance-scored sources
   panel showing the exact passages used.
@@ -59,6 +64,38 @@ upload documents, and start chatting.
 > passages — perfect for trying the product end to end. Endpoints without an embeddings
 > API (e.g. DeepSeek) work out of the box: chat goes to the LLM, embeddings stay local,
 > and BM25 keeps lexical search strong.
+
+## Chinese support
+
+Chinese ships as a first-class language, not an afterthought.
+
+**Interface** — a dependency-free i18n layer (`app/static/i18n.js`) with `zh`/`en`
+dictionaries. The UI follows `navigator.language` on first visit (Chinese browsers get
+Chinese, English browsers stay English), the topbar button switches at runtime, and the
+choice is remembered in `localStorage`. Dates format per UI language, so an English
+interface never shows 11月4日. The embeddable widget is bilingual too, with
+`?lang=zh` / `?lang=en` for per-customer defaults.
+
+**Retrieval** — Chinese has no spaces, so without a dictionary you must pick a splitting
+granularity. RAGbase indexes **character bigrams**:
+
+| Text | Unigrams (old) | Bigrams (now) |
+|---|---|---|
+| `退款政策` | 退 / 款 / 政 / 策 | 退款 / 款政 / 政策 |
+| query `退款` vs doc `汇款手续费` | matches (both contain 款) | no match |
+| query `退款` vs doc `退款政策` | matches | matches |
+
+Single-character runs stay as-is (`税` still works). The same tokenizer feeds both BM25
+and the local feature-hash vectors, so both retrievers agree on vocabulary.
+
+Demo vectors are hashes of those tokens, so changing the tokenizer moves the coordinate
+space. On startup the app compares `meta.tokenizer_version` and re-embeds every chunk
+in batches when it differs — no manual migration, no data loss. Deployments using a real
+embedding API are unaffected (the provider owns the model).
+
+**Answers** — the system prompt pins the reply language to the question's language while
+keeping `[1]` citation markers intact; demo-mode fallbacks are bilingual; SSE streams
+Chinese in small slices so it types out visibly instead of appearing in one dump.
 
 ## Works with any OpenAI-compatible LLM
 
@@ -201,7 +238,7 @@ No LLM key, no network, and your `data/` folder is never touched.
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                        # 321 tests, ~45s
+pytest                                        # 326 tests, ~45s
 pytest --cov=app --cov-report=term-missing    # 99% coverage of app/
 ```
 
@@ -211,8 +248,8 @@ pytest --cov=app --cov-report=term-missing    # 99% coverage of app/
 | bcrypt hashing, JWT, email validation | `tests/test_auth_unit.py` |
 | SQLite layer: users, documents, chunks, API keys, conversations, cascades | `tests/test_database.py` |
 | Parsing & chunking (txt, md, html, docx, pdf) | `tests/test_ingest.py` |
-| Demo engine + OpenAI-compatible chat/embeddings | `tests/test_providers.py` |
-| BM25 scoring, index caching, per-user isolation | `tests/test_bm25.py` |
+| Demo engine, OpenAI-compatible chat/embeddings, tokenizer & vector migration | `tests/test_providers.py` |
+| BM25 scoring, index caching, per-user isolation, Chinese queries | `tests/test_bm25.py` |
 | Retrieval, RRF fusion, prompt assembly, answers | `tests/test_rag.py` |
 | HTTP: auth, documents, SSE chat, conversations, API keys & widget, admin, static/CORS | `tests/test_api_*.py` |
 | Ops CLI (`python -m app.tools`) | `tests/test_tools_cli.py` |
@@ -229,10 +266,10 @@ ragbase/
 │   ├── auth.py             # JWT + bcrypt
 │   ├── ingest.py           # parsing (pdf/docx/txt/md/html) + chunking
 │   ├── bm25.py             # per-user lexical index, cached in memory
-│   ├── providers.py        # OpenAI / demo providers (embeddings + chat)
+│   ├── providers.py        # OpenAI / demo providers, zh/en tokenizer, vector migration
 │   ├── rag.py              # retrieval, RRF fusion, prompt building, cited answering
 │   └── tools.py            # ops CLI
-└── app/static/             # frontend (vanilla JS, no build step)
+└── app/static/             # frontend (vanilla JS, no build): i18n.js, app.js, styles.css
 ```
 
 ## Operations
@@ -247,8 +284,12 @@ python -m app.tools list-users
 
 - **Branding:** app name and logo in `app/static/index.html`; colors are CSS custom
   properties at the top of `app/static/styles.css`.
+- **Copy & languages:** `I18N.en` / `I18N.zh` in `app/static/i18n.js` — add a dictionary
+  to add a language.
 - **Persona:** edit `SYSTEM_PROMPT` in `app/rag.py`.
-- **Retrieval quality:** tune `RAGBASE_TOP_K`, threshold, and chunk size via `.env`.
+- **Retrieval quality:** tune `RAGBASE_TOP_K`, threshold, and chunk size via `.env`;
+  CJK granularity lives in `providers._cjk_tokens()` (bump `TOKENIZER_VERSION` after
+  changing it — vectors are rebuilt on the next start).
 
 ## License
 

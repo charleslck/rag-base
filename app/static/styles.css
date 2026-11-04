@@ -132,6 +132,10 @@ button { font-family: inherit; cursor: pointer; }
 }
 .topbar-brand { font-weight: 800; font-size: 16px; letter-spacing: 0.2px; }
 .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+/* language toggle: icon-btn is a fixed 40px square, text needs to breathe */
+.lang-btn { width: auto; min-width: 40px; padding: 0 10px; font-size: 12px; font-weight: 700; letter-spacing: 0.2px; }
+.auth-lang { margin-top: 14px; text-align: center; }
+.auth-lang .link-btn { font-size: 12px; color: var(--text-dim); }
 .user-chip { display: flex; align-items: center; gap: 10px; margin-left: 8px; font-size: 13px; color: var(--text-dim); }
 #menu-btn { display: none; }
 

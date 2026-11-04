@@ -8,6 +8,7 @@ import pytest
 
 from app import providers
 from app.config import settings
+from helpers import create_test_user, seed_document
 
 
 # ------------------------------------------------------------------- tokens
@@ -21,13 +22,18 @@ def test_tokens_lowercase_and_keep_numbers():
     assert providers._tokens("HTTP 404 Error") == ["http", "404", "error"]
 
 
-def test_tokens_split_chinese_into_unigrams():
-    tokens = providers._tokens("退款政策")
-    assert tokens == ["退", "款", "政", "策"]
+def test_tokens_split_chinese_into_bigrams():
+    # no dictionary segmentation is available offline, so CJK runs are indexed
+    # as overlapping bigrams: precise enough to separate 退款 from 汇款/条款
+    assert providers._tokens("退款政策") == ["退款", "款政", "政策"]
+
+
+def test_tokens_keep_single_character_cjk_run():
+    assert providers._tokens("税") == ["税"]
 
 
 def test_tokens_mix_latin_and_chinese():
-    assert set(providers._tokens("退款 policy")) == {"退", "款", "policy"}
+    assert set(providers._tokens("退款 policy")) == {"退款", "policy"}
 
 
 def test_tokens_ignore_punctuation_only_input():
@@ -126,9 +132,25 @@ def test_demo_chat_deduplicates_repeated_sentences():
     assert answer.count("Refund policy is 30 days") == 1
 
 
-def test_demo_chat_stream_yields_word_by_word():
+def test_demo_chat_stream_reconstructs_the_answer():
     text = "two words"
-    assert "".join(providers.DemoChat().stream(text)) == "two words "
+    assert "".join(providers.DemoChat().stream(text)) == text
+
+
+def test_demo_chat_stream_slices_chinese_text():
+    # Chinese has no spaces: slices must still arrive progressively, not as
+    # one giant chunk, while concatenating back to the exact original
+    text = "退款政策在三十天内有效。"
+    chunks = list(providers.DemoChat().stream(text))
+    assert "".join(chunks) == text
+    assert len(chunks) > 1
+
+
+def test_demo_chat_answers_chinese_questions_in_chinese():
+    contexts = [{"content": "退款政策：购买后 30 天内可申请全额退款。", "rank": 1}]
+    answer = providers.DemoChat().answer("退款期限是多久？", contexts)
+    assert "根据你的知识库" in answer
+    assert "30 天" in answer
 
 
 def test_demo_chat_stemming_matches_plurals():
@@ -281,3 +303,32 @@ def test_embed_client_is_built_from_the_embedding_settings(monkeypatch, patch_se
     assert str(client.base_url).startswith("https://embed.example.test/v1")
     assert client.api_key == "sk-embed"
     providers._openai_client = None
+
+
+# ------------------------------------------------- vector migration
+
+def test_ensure_vector_compatibility_rebuilds_stale_vectors():
+    import numpy as np
+
+    from app import database as db
+
+    uid = create_test_user("migrate@example.com")
+    seed_document(uid, "refund-zh.txt", ["退款政策允许三十天内退货。"])
+    # pretend the rows were written by an older tokenizer
+    db.set_meta("tokenizer_version", "1")
+    conn = db.get_conn()
+    conn.execute("UPDATE embeddings SET vector = ?", (db.vec_to_blob(np.zeros(512, dtype=np.float32)),))
+    conn.commit()
+
+    assert providers.ensure_vector_compatibility() == 1
+    assert db.get_meta("tokenizer_version") == str(providers.TOKENIZER_VERSION)
+
+    _, matrix = db.all_chunk_vectors(uid)
+    assert float(np.linalg.norm(matrix[0])) > 0
+
+
+def test_ensure_vector_compatibility_is_a_noop_when_up_to_date():
+    from app import database as db
+
+    db.set_meta("tokenizer_version", str(providers.TOKENIZER_VERSION))
+    assert providers.ensure_vector_compatibility() == 0

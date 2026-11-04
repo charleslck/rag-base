@@ -9,6 +9,9 @@ const state = {
   conversations: [],
   sources: [],
   streaming: false,
+  view: "welcome", // welcome | chat | auth
+  banner: null, // "demo" | "embedding" | null
+  bannerModel: "",
 };
 
 /* ---------------- helpers ---------------- */
@@ -29,26 +32,29 @@ async function api(path, options = {}) {
   const res = await fetch(path, { ...options, headers, body });
   if (res.status === 401 && state.token) {
     logout();
-    throw new Error("Session expired — please sign in again.");
+    throw new Error(t("err.sessionExpired"));
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || "Request failed (" + res.status + ")");
+  if (!res.ok) throw new Error(data.detail || t("err.request", { status: res.status }));
   return data;
 }
 
 function fmtTime(ts) {
-  return new Date(ts * 1000).toLocaleString(undefined, {
+  // date formatting must follow the UI language, not the OS locale
+  return new Date(ts * 1000).toLocaleString(currentLang() === "zh" ? "zh-CN" : "en-US", {
     month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
   });
 }
 
 /* ---------------- auth view ---------------- */
 function showAuth() {
+  state.view = "auth";
   $("#app-view").classList.add("hidden");
   $("#auth-view").classList.remove("hidden");
 }
 
 function showApp() {
+  state.view = "app";
   $("#auth-view").classList.add("hidden");
   $("#app-view").classList.remove("hidden");
 }
@@ -56,13 +62,11 @@ function showApp() {
 function setAuthMode(mode) {
   state.mode = mode;
   const isLogin = mode === "login";
-  $("#auth-title").textContent = isLogin ? "Welcome back" : "Create your account";
-  $("#auth-sub").textContent = isLogin
-    ? "Sign in to chat with your knowledge base."
-    : "The first registered account becomes the admin.";
-  $("#auth-submit").textContent = isLogin ? "Sign in" : "Create account";
-  $("#auth-switch-text").textContent = isLogin ? "No account yet?" : "Already have an account?";
-  $("#auth-switch-btn").textContent = isLogin ? "Create one" : "Sign in";
+  $("#auth-title").textContent = t(isLogin ? "auth.login.title" : "auth.register.title");
+  $("#auth-sub").textContent = t(isLogin ? "auth.login.sub" : "auth.register.sub");
+  $("#auth-submit").textContent = t(isLogin ? "auth.login.submit" : "auth.register.submit");
+  $("#auth-switch-text").textContent = t(isLogin ? "auth.noAccount" : "auth.haveAccount");
+  $("#auth-switch-btn").textContent = t(isLogin ? "auth.createOne" : "auth.toLogin");
   $("#auth-password").autocomplete = isLogin ? "current-password" : "new-password";
   $("#auth-error").classList.add("hidden");
 }
@@ -77,7 +81,7 @@ $("#auth-form").addEventListener("submit", async (e) => {
   const email = $("#auth-email").value.trim();
   const password = $("#auth-password").value;
   if (!email || !password) {
-    err.textContent = "Email and password are required.";
+    err.textContent = t("auth.missingFields");
     err.classList.remove("hidden");
     return;
   }
@@ -105,21 +109,27 @@ function logout() {
 $("#logout-btn").addEventListener("click", logout);
 
 /* ---------------- boot ---------------- */
+function renderBanner() {
+  const banner = $("#demo-banner");
+  if (state.banner === "demo") {
+    banner.innerHTML = t("banner.demo");
+    banner.classList.remove("hidden");
+  } else if (state.banner === "embedding") {
+    banner.innerHTML = t("banner.embeddingLocal", { model: esc(state.bannerModel || "") });
+    banner.classList.remove("hidden");
+  } else {
+    banner.classList.add("hidden");
+  }
+}
+
 async function boot() {
   if (!state.token) return showAuth();
   try {
     const me = await api("/api/me");
     $("#user-email").textContent = me.email;
-    const banner = $("#demo-banner");
-    if (me.demo_mode) {
-      banner.innerHTML = "Demo mode — no chat model configured. Answers are extracted locally from your documents. Add <code>RAGBASE_LLM_API_KEY</code> in <code>.env</code> to enable the full LLM.";
-      banner.classList.remove("hidden");
-    } else if (me.embedding_local) {
-      banner.innerHTML = "Chat model: <strong>" + esc(me.model) + "</strong> — embeddings run locally (no embedding API configured); BM25 lexical search is active.";
-      banner.classList.remove("hidden");
-    } else {
-      banner.classList.add("hidden");
-    }
+    state.banner = me.demo_mode ? "demo" : me.embedding_local ? "embedding" : null;
+    state.bannerModel = me.model;
+    renderBanner();
     showApp();
     await Promise.all([loadConversations(), loadDocuments()]);
     showWelcome();
@@ -176,13 +186,13 @@ function renderEmbedCode(key) {
 $("#copy-embed").addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText($("#embed-code").value);
-    $("#copy-embed").textContent = "Copied!";
+    $("#copy-embed").textContent = t("int.embed.copied");
   } catch {
     $("#embed-code").select();
     document.execCommand("copy");
-    $("#copy-embed").textContent = "Copied!";
+    $("#copy-embed").textContent = t("int.embed.copied");
   }
-  setTimeout(() => ($("#copy-embed").textContent = "Copy snippet"), 1500);
+  setTimeout(() => ($("#copy-embed").textContent = t("int.embed.copy")), 1500);
 });
 
 async function loadKeys() {
@@ -190,7 +200,7 @@ async function loadKeys() {
   const list = $("#key-list");
   list.innerHTML = "";
   if (!data.keys.length) {
-    list.innerHTML = '<p class="pane-empty">No API keys yet. Create one to embed the chat widget.</p>';
+    list.innerHTML = '<p class="pane-empty">' + esc(t("int.keys.empty")) + "</p>";
     return;
   }
   for (const k of data.keys) {
@@ -199,7 +209,7 @@ async function loadKeys() {
     item.innerHTML =
       '<span class="key-prefix">' + esc(k.prefix) + '…</span>' +
       '<span class="key-label">' + esc(k.label || "—") + "</span>" +
-      '<button class="key-del" aria-label="Revoke key" title="Revoke">' +
+      '<button class="key-del" aria-label="' + esc(t("int.keys.revoke")) + '" title="' + esc(t("int.keys.revoke")) + '">' +
       '<svg width="12" height="12" viewBox="0 0 14 14" fill="none"><path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button>';
     item.querySelector(".key-del").addEventListener("click", async () => {
       await api("/api/api-keys/" + k.id, { method: "DELETE" });
@@ -220,7 +230,7 @@ $("#key-form").addEventListener("submit", async (e) => {
     renderEmbedCode(data.key);
     loadKeys();
   } catch (ex) {
-    alert("Failed to create key: " + ex.message);
+    alert(t("err.keyCreate", { msg: ex.message }));
   }
 });
 
@@ -231,7 +241,7 @@ async function loadConversations() {
   const list = $("#conv-list");
   list.innerHTML = "";
   if (!state.conversations.length) {
-    list.innerHTML = '<p class="pane-empty">No conversations yet.</p>';
+    list.innerHTML = '<p class="pane-empty">' + esc(t("conv.empty")) + "</p>";
     return;
   }
   for (const conv of state.conversations) {
@@ -239,7 +249,7 @@ async function loadConversations() {
     btn.className = "conv-item" + (conv.id === state.conversationId ? " active" : "");
     btn.innerHTML =
       '<span class="conv-title">' + esc(conv.title) + "</span>" +
-      '<span class="conv-del" role="button" tabindex="0" aria-label="Delete conversation" title="Delete">' +
+      '<span class="conv-del" role="button" tabindex="0" aria-label="' + esc(t("conv.delete")) + '" title="' + esc(t("conv.delete")) + '">' +
       '<svg width="13" height="13" viewBox="0 0 14 14" fill="none"><path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></span>';
     btn.addEventListener("click", (e) => {
       if (e.target.closest(".conv-del")) return;
@@ -284,20 +294,20 @@ async function loadDocuments() {
   const list = $("#doc-list");
   list.innerHTML = "";
   if (!data.documents.length) {
-    list.innerHTML = '<p class="pane-empty">Knowledge base is empty.<br>Upload documents to get started.</p>';
+    list.innerHTML = '<p class="pane-empty">' + t("kb.empty") + "</p>";
     return;
   }
   for (const doc of data.documents) {
     const item = document.createElement("div");
     item.className = "doc-item";
     const meta = doc.status === "ready"
-      ? esc(doc.num_chunks) + " chunks · " + fmtTime(doc.created_at)
-      : '<span class="doc-error">' + esc(doc.error || "Failed") + "</span>";
+      ? esc(t(doc.num_chunks === 1 ? "kb.chunkOne" : "kb.chunks", { n: doc.num_chunks })) + " · " + fmtTime(doc.created_at)
+      : '<span class="doc-error">' + esc(doc.error || t("err.failed")) + "</span>";
     item.innerHTML =
       FILE_ICON +
       '<div class="doc-body"><div class="doc-name" title="' + esc(doc.filename) + '">' + esc(doc.filename) + "</div>" +
       '<div class="doc-meta">' + meta + "</div></div>" +
-      '<button class="doc-del" aria-label="Delete document" title="Delete">' +
+      '<button class="doc-del" aria-label="' + esc(t("kb.delete")) + '" title="' + esc(t("kb.delete")) + '">' +
       '<svg width="13" height="13" viewBox="0 0 14 14" fill="none"><path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button>';
     item.querySelector(".doc-del").addEventListener("click", async () => {
       await api("/api/documents/" + doc.id, { method: "DELETE" });
@@ -332,9 +342,13 @@ async function uploadFiles(fileList) {
   try {
     const data = await api("/api/documents", { method: "POST", body: fd });
     const fails = data.results.filter((r) => !r.ok);
-    if (fails.length) alert("Some files failed:\n" + fails.map((f) => "• " + f.filename + ": " + f.error).join("\n"));
+    if (fails.length) {
+      alert(t("err.uploadSome", {
+        list: fails.map((f) => "• " + f.filename + ": " + f.error).join("\n"),
+      }));
+    }
   } catch (ex) {
-    alert("Upload failed: " + ex.message);
+    alert(t("err.upload", { msg: ex.message }));
   } finally {
     dropZone.style.opacity = "";
     dropZone.style.pointerEvents = "";
@@ -355,12 +369,14 @@ function ensureWrap() {
 }
 
 function showWelcome() {
+  state.view = "welcome";
+  state.sources = [];
   messagesEl().innerHTML =
-    '<div class="welcome"><h2>Ask your knowledge base anything</h2>' +
-    "<p>Upload documents in the Knowledge base tab, then ask questions here. Every answer cites its sources.</p>" +
+    '<div class="welcome"><h2>' + esc(t("chat.welcome.title")) + "</h2>" +
+    "<p>" + esc(t("chat.welcome.desc")) + "</p>" +
     '<div class="suggestions">' +
-    ["What are the main topics covered?", "Summarize the key points", "What does the document say about pricing?"]
-      .map((s) => '<button class="suggestion" type="button">' + esc(s) + "</button>")
+    ["chat.sugg.1", "chat.sugg.2", "chat.sugg.3"]
+      .map((key) => '<button class="suggestion" type="button">' + esc(t(key)) + "</button>")
       .join("") +
     "</div></div>";
   document.querySelectorAll(".suggestion").forEach((btn) =>
@@ -368,7 +384,7 @@ function showWelcome() {
       $("#chat-input").value = btn.textContent;
       $("#composer").requestSubmit();
     }));
-  $("#sources-list").innerHTML = '<p class="dim sources-empty">Cited sources will appear here after the assistant answers.</p>';
+  $("#sources-list").innerHTML = '<p class="dim sources-empty">' + esc(t("sources.empty")) + "</p>";
 }
 
 function renderMarkdownLite(text) {
@@ -408,14 +424,14 @@ function addMessage(role, content, sources) {
 
   const div = document.createElement("div");
   div.className = "msg " + role;
-  const label = role === "user" ? "You" : "Assistant";
+  const label = role === "user" ? t("chat.you") : t("chat.assistant");
   const initial = role === "user" ? "U" : "AI";
   let html =
     '<div class="msg-avatar">' + initial + '</div>' +
-    '<div class="msg-body"><div class="msg-role">' + label + "</div>" +
+    '<div class="msg-body"><div class="msg-role">' + esc(label) + "</div>" +
     '<div class="msg-text">' + (role === "assistant" ? renderCitationChips(content) : renderMarkdownLite(content)) + "</div>";
   if (sources && sources.length) {
-    html += '<div class="msg-sources">Sources: ' + sources.map(
+    html += '<div class="msg-sources">' + esc(t("chat.sourcesPrefix")) + sources.map(
       (s) => '<button type="button" class="src-pill" data-cite="' + s.rank + '">' +
         '<span class="num">' + s.rank + "</span>" + esc(s.doc_name) + "</button>"
     ).join("") + "</div>";
@@ -435,17 +451,19 @@ function addMessage(role, content, sources) {
 }
 
 function renderMessages(messages) {
+  state.view = "chat";
   messagesEl().innerHTML = '<div class="messages-wrap"></div>';
   for (const m of messages) addMessage(m.role, m.content, m.sources);
 }
 
 function renderSources(sources) {
+  state.sources = sources || [];
   const list = $("#sources-list");
-  if (!sources || !sources.length) {
-    list.innerHTML = '<p class="dim sources-empty">No relevant passages were found in the knowledge base for this question.</p>';
+  if (!state.sources.length) {
+    list.innerHTML = '<p class="dim sources-empty">' + esc(t("sources.none")) + "</p>";
     return;
   }
-  list.innerHTML = sources.map((s) => {
+  list.innerHTML = state.sources.map((s) => {
     const pct = Math.round(Math.min(1, Math.max(0, s.score)) * 100);
     return (
       '<div class="source-item" id="source-' + s.rank + '">' +
@@ -487,6 +505,7 @@ $("#composer").addEventListener("submit", async (e) => {
 
 async function sendMessage(text) {
   state.streaming = true;
+  state.view = "chat";
   $("#send-btn").disabled = true;
   addMessage("user", text);
 
@@ -496,7 +515,7 @@ async function sendMessage(text) {
   placeholder.className = "msg assistant";
   placeholder.innerHTML =
     '<div class="msg-avatar">AI</div><div class="msg-body">' +
-    '<div class="msg-role">Assistant</div><div class="msg-text"><span class="typing"><span></span><span></span><span></span></span></div></div>';
+    '<div class="msg-role">' + esc(t("chat.assistant")) + '</div><div class="msg-text"><span class="typing"><span></span><span></span><span></span></span></div></div>';
   wrap.appendChild(placeholder);
   messagesEl().scrollTop = messagesEl().scrollHeight;
   const textEl = placeholder.querySelector(".msg-text");
@@ -513,7 +532,7 @@ async function sendMessage(text) {
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || "Chat failed (" + res.status + ")");
+      throw new Error(err.detail || t("err.chat", { status: res.status }));
     }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -545,7 +564,7 @@ async function sendMessage(text) {
         }
       }
     }
-    if (!started) textEl.textContent = "No response.";
+    if (!started) textEl.textContent = t("chat.noResponse");
     bindCiteChips(textEl);
   } catch (ex) {
     textEl.textContent = ex.message;
@@ -557,6 +576,37 @@ async function sendMessage(text) {
   }
 }
 
+/* ---------------- language ---------------- */
+function refreshForLang() {
+  applyI18n();
+  $("#auth-lang-label").textContent = t("lang.name");
+  if (state.view === "auth") {
+    setAuthMode(state.mode);
+    return;
+  }
+  renderBanner();
+  loadConversations();
+  loadDocuments();
+  if (!$("#pane-int").classList.contains("hidden")) loadKeys();
+  if (state.streaming) return; // don't clobber an answer that is still streaming
+  if (state.conversationId) {
+    api("/api/conversations/" + state.conversationId + "/messages")
+      .then((data) => {
+        renderMessages(data.messages);
+        renderSources(state.sources);
+      })
+      .catch(() => {});
+  } else {
+    showWelcome();
+  }
+}
+
+$("#lang-btn").addEventListener("click", toggleLang);
+$("#auth-lang-btn").addEventListener("click", toggleLang);
+document.addEventListener("langchange", refreshForLang);
+
 /* ---------------- init ---------------- */
+applyI18n();
+$("#auth-lang-label").textContent = t("lang.name");
 setAuthMode("login");
 boot();

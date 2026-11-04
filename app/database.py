@@ -93,6 +93,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             label TEXT,
             created_at REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
         """
     )
     conn.commit()
@@ -118,6 +122,25 @@ def vec_to_blob(vec) -> bytes:
 
 def blob_to_vec(blob: bytes) -> np.ndarray:
     return np.frombuffer(blob, dtype=np.float32)
+
+
+# ---------------------------------------------------------------- meta
+# Small key/value store for schema/format bookkeeping (e.g. the tokenizer
+# version that produced the stored demo vectors).
+
+def get_meta(key: str) -> str | None:
+    row = get_conn().execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_meta(key: str, value: str) -> None:
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+    conn.commit()
 
 
 # ---------------------------------------------------------------- users

@@ -61,8 +61,8 @@
 <body>
   <div class="head">
     <span class="dot"></span>
-    <span class="head-title">Ask us anything</span>
-    <span class="head-sub">answers from our docs</span>
+    <span class="head-title" id="head-title">Ask us anything</span>
+    <span class="head-sub" id="head-sub">answers from our docs</span>
   </div>
   <div class="msgs" id="msgs"></div>
   <form class="composer" id="composer">
@@ -72,8 +72,28 @@
 
 <script>
 "use strict";
-const KEY = new URLSearchParams(location.search).get("key") || "";
-const GREETING = "Hi! Ask me anything — I answer from our documentation and cite my sources.";
+const PARAMS = new URLSearchParams(location.search);
+const KEY = PARAMS.get("key") || "";
+/* widget language: ?lang=zh|en overrides, otherwise follow the visitor's browser */
+const LANG = (PARAMS.get("lang") || navigator.language || "en").toLowerCase().startsWith("zh") ? "zh" : "en";
+const STR = LANG === "zh" ? {
+  title: "有问题尽管问",
+  sub: "答案来自我们的文档",
+  placeholder: "输入你的问题…",
+  greeting: "你好！有什么想了解的尽管问 —— 我会基于我们的文档回答，并标注引用来源。",
+  error: "请求失败",
+} : {
+  title: "Ask us anything",
+  sub: "answers from our docs",
+  placeholder: "Type your question…",
+  greeting: "Hi! Ask me anything — I answer from our documentation and cite my sources.",
+  error: "Request failed",
+};
+document.documentElement.lang = LANG === "zh" ? "zh-CN" : "en";
+document.getElementById("head-title").textContent = STR.title;
+document.getElementById("head-sub").textContent = STR.sub;
+document.getElementById("input").placeholder = STR.placeholder;
+const GREETING = STR.greeting;
 const msgs = document.getElementById("msgs");
 const input = document.getElementById("input");
 const convKey = "ragbase_widget_conv_" + KEY.slice(0, 10);

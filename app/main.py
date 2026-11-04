@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import auth, database as db, ingest, rag
+from . import auth, database as db, ingest, providers, rag
 from .config import settings
 
 app = FastAPI(title="RAGbase", version="1.0.0")
@@ -42,6 +42,11 @@ async def widget_cors(request: Request, call_next):
 @app.on_event("startup")
 def startup():
     db.init_db()
+    # local (demo) vectors are hashed from our own tokens: rebuild them once
+    # after a tokenizer upgrade so existing knowledge bases stay searchable
+    rebuilt = providers.ensure_vector_compatibility()
+    if rebuilt:
+        print(f"[ragbase] re-embedded {rebuilt} chunks for tokenizer v{providers.TOKENIZER_VERSION}")
 
 
 @app.get("/api/health")
