@@ -1,9 +1,16 @@
-"""SQLite storage: users, documents, chunks (with float32 embedding blobs),
-conversations and messages. A single-file database keeps deployment trivial;
-swap this module for Postgres + pgvector for large deployments.
+"""SQLite storage: users, documents, chunks (float32 embedding blobs),
+conversations and messages.
+
+This build is an on-premise installation: one knowledge base per account, no
+team/tenant hierarchy. Earlier builds added orgs, roles and multiple knowledge
+bases for a hosted service; those resources are gone from the code, but
+columns/tables left behind in an upgraded database are harmless — they are
+nullable and never written here, so existing data keeps working.
 """
+import hashlib
 import json
 import os
+import secrets as _secrets
 import sqlite3
 import threading
 import time
@@ -46,6 +53,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             is_admin INTEGER NOT NULL DEFAULT 0,
+            email_verified INTEGER NOT NULL DEFAULT 1,
+            token_version INTEGER NOT NULL DEFAULT 0,
             created_at REAL NOT NULL
         );
         CREATE TABLE IF NOT EXISTS documents (
@@ -84,6 +93,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS conversations (
             id TEXT PRIMARY KEY,
             user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            api_key_id TEXT,
             title TEXT NOT NULL DEFAULT 'New conversation',
             created_at REAL NOT NULL,
             updated_at REAL NOT NULL
@@ -113,27 +123,74 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+        -- One row per answered question. Kept for capacity planning and
+        -- per-key reporting; no billing is attached to these numbers.
+        CREATE TABLE IF NOT EXISTS usage_events (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            api_key_id TEXT,
+            source TEXT NOT NULL DEFAULT 'web',
+            model TEXT NOT NULL DEFAULT '',
+            prompt_tokens INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            contexts INTEGER NOT NULL DEFAULT 0,
+            latency_ms INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'ok',
+            created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_usage_user_time ON usage_events(user_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_usage_key_time ON usage_events(api_key_id, created_at);
+        -- Append-only activity trail for the operator (instance-wide).
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id TEXT PRIMARY KEY,
+            actor_id TEXT,
+            actor_email TEXT,
+            action TEXT NOT NULL,
+            target_type TEXT,
+            target_id TEXT,
+            detail TEXT,
+            ip TEXT,
+            created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(created_at);
         """
     )
     _migrate(conn)
     conn.commit()
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
+def _add_columns(conn: sqlite3.Connection, table: str, spec: tuple[tuple[str, str], ...]) -> None:
     """Add columns introduced after the first release (SQLite has no IF NOT EXISTS)."""
-    have = {r["name"] for r in conn.execute("PRAGMA table_info(api_keys)")}
-    for column, ddl in (
+    have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+    for column, ddl in spec:
+        if column not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Upgrade old databases in place, without touching their existing rows.
+
+    Only columns this build actually uses are added. A database that once ran
+    the hosted/team version may still carry org_id / kb_id columns and the
+    orgs / org_members / knowledge_bases / invites tables; they are nullable,
+    ignored here and left alone so a downgrade never destroys data.
+    """
+    _add_columns(conn, "api_keys", (
         ("config", "TEXT NOT NULL DEFAULT '{}'"),
         ("allowed_origins", "TEXT NOT NULL DEFAULT ''"),
         ("plan", "TEXT NOT NULL DEFAULT 'free'"),
-    ):
-        if column not in have:
-            conn.execute(f"ALTER TABLE api_keys ADD COLUMN {column} {ddl}")
-
-    # documents.folder_id arrived with the file library's folders
-    docs = {r["name"] for r in conn.execute("PRAGMA table_info(documents)")}
-    if "folder_id" not in docs:
-        conn.execute("ALTER TABLE documents ADD COLUMN folder_id TEXT")
+    ))
+    _add_columns(conn, "documents", (
+        ("folder_id", "TEXT"),
+        ("status", "TEXT NOT NULL DEFAULT 'ready'"),
+        ("num_chunks", "INTEGER NOT NULL DEFAULT 0"),
+        ("error", "TEXT"),
+    ))
+    _add_columns(conn, "users", (
+        ("email_verified", "INTEGER NOT NULL DEFAULT 1"),
+        ("token_version", "INTEGER NOT NULL DEFAULT 0"),
+    ))
+    _add_columns(conn, "conversations", (("api_key_id", "TEXT"),))
     conn.execute("CREATE INDEX IF NOT EXISTS idx_docs_folder ON documents(folder_id)")
 
 
@@ -182,11 +239,13 @@ def set_meta(key: str, value: str) -> None:
 
 def create_user(email: str, password_hash: str, is_admin: bool) -> dict:
     uid = new_id()
-    get_conn().execute(
-        "INSERT INTO users (id, email, password_hash, is_admin, created_at) VALUES (?,?,?,?,?)",
-        (uid, email, password_hash, int(is_admin), now()),
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO users (id, email, password_hash, is_admin, email_verified, token_version, created_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (uid, email, password_hash, int(is_admin), 1, 0, now()),
     )
-    get_conn().commit()
+    conn.commit()
     return {"id": uid, "email": email, "is_admin": is_admin}
 
 
@@ -205,16 +264,32 @@ def user_count() -> int:
 
 
 def list_users():
-    rows = get_conn().execute("SELECT id, email, is_admin, created_at FROM users ORDER BY created_at").fetchall()
+    rows = get_conn().execute(
+        "SELECT id, email, is_admin, created_at FROM users ORDER BY created_at"
+    ).fetchall()
     return [dict(r) for r in rows]
 
 
-def update_password(uid: str, password_hash: str) -> bool:
-    cur = get_conn().execute(
-        "UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, uid)
-    )
-    get_conn().commit()
+def update_password(uid: str, password_hash: str, *, revoke_sessions: bool = True) -> bool:
+    """Change the hash and, by default, drop every live token (version bump)."""
+    conn = get_conn()
+    if revoke_sessions:
+        cur = conn.execute(
+            "UPDATE users SET password_hash = ?, token_version = token_version + 1 WHERE id = ?",
+            (password_hash, uid),
+        )
+    else:
+        cur = conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, uid))
+    conn.commit()
     return cur.rowcount > 0
+
+
+def revoke_sessions(uid: str) -> int:
+    """Invalidate every JWT issued so far by bumping the version they carry."""
+    conn = get_conn()
+    cur = conn.execute("UPDATE users SET token_version = token_version + 1 WHERE id = ?", (uid,))
+    conn.commit()
+    return cur.rowcount
 
 
 def delete_user(uid: str) -> None:
@@ -225,12 +300,15 @@ def delete_user(uid: str) -> None:
 
 # ---------------------------------------------------------------- documents
 
-def create_document(user_id: str, filename: str, folder_id: str | None = None) -> str:
+def create_document(user_id: str, filename: str, folder_id: str | None = None,
+                    status: str = "ready") -> str:
+    """Insert the row. `processing` is used while a background job embeds it."""
     did = new_id()
     conn = get_conn()
     conn.execute(
-        "INSERT INTO documents (id, user_id, filename, created_at, folder_id) VALUES (?,?,?,?,?)",
-        (did, user_id, filename, now(), folder_id or None),
+        "INSERT INTO documents (id, user_id, filename, status, created_at, folder_id) "
+        "VALUES (?,?,?,?,?,?)",
+        (did, user_id, filename, status, now(), folder_id or None),
     )
     conn.commit()
     return did
@@ -303,6 +381,40 @@ def insert_chunk(doc_id: str, user_id: str, idx: int, content: str, vector) -> N
     conn.commit()
 
 
+def insert_chunks(doc_id: str, user_id: str, chunks: list[str], vectors,
+                  offset: int = 0) -> int:
+    """Bulk-insert a slice of a document: one transaction instead of N commits.
+
+    Background ingestion writes a document in batches, so this is what keeps a
+    200-chunk PDF to a handful of fsyncs instead of 200. `offset` keeps the
+    per-document `idx` numbering continuous across batches.
+    """
+    rows, vec_rows = [], []
+    for i, (content, vector) in enumerate(zip(chunks, vectors)):
+        cid = new_id()
+        rows.append((cid, doc_id, user_id, offset + i, content))
+        vec_rows.append((cid, vec_to_blob(vector)))
+    if not rows:
+        return 0
+    conn = get_conn()
+    conn.executemany(
+        "INSERT INTO chunks (id, doc_id, user_id, idx, content) VALUES (?,?,?,?,?)", rows
+    )
+    conn.executemany("INSERT INTO embeddings (chunk_id, vector) VALUES (?,?)", vec_rows)
+    conn.commit()
+    return len(rows)
+
+
+def fail_stuck_documents(reason: str = "Interrupted by a server restart — upload it again.") -> int:
+    """Close out documents a crash left in `processing`."""
+    conn = get_conn()
+    cur = conn.execute(
+        "UPDATE documents SET status = 'error', error = ? WHERE status = 'processing'", (reason,)
+    )
+    conn.commit()
+    return cur.rowcount
+
+
 def delete_document(doc_id: str, user_id: str) -> bool:
     conn = get_conn()
     cur = conn.execute("DELETE FROM documents WHERE id = ? AND user_id = ?", (doc_id, user_id))
@@ -311,12 +423,7 @@ def delete_document(doc_id: str, user_id: str) -> bool:
 
 
 def delete_documents(doc_ids, user_id: str) -> int:
-    """Delete several documents in one transaction, returns how many went.
-
-    Chunks and embeddings follow through the foreign-key cascade, so a hundred
-    deletes cost one statement instead of a hundred connections and commits.
-    Ids the caller does not own simply do not match — no error, no leak.
-    """
+    """Delete several documents in one transaction, returns how many went."""
     ids = [d for d in dict.fromkeys(doc_ids) if d]
     if not ids:
         return 0
@@ -389,11 +496,7 @@ def _folder_subtree(conn: sqlite3.Connection, folder_id: str, user_id: str) -> l
 
 
 def delete_folder(folder_id: str, user_id: str):
-    """Drop a folder and everything under it; documents go back to the root.
-
-    Deleting the folders' documents instead would make one mis-click able to
-    destroy a hundred files — and there is a batch delete for that already.
-    """
+    """Drop a folder and everything under it; documents go back to the root."""
     conn = get_conn()
     ids = _folder_subtree(conn, folder_id, user_id)
     if not ids:
@@ -452,10 +555,6 @@ def all_chunk_vectors(user_id: str, doc_ids=None):
 
 
 # ---------------------------------------------------------------- api keys
-
-import hashlib
-import secrets as _secrets
-
 
 def create_api_key(user_id: str, label: str = "", config=None, plan: str = "free",
                    allowed_origins: str = "") -> tuple[dict, str]:
@@ -572,12 +671,14 @@ def get_user_by_api_key(full_key: str):
 
 # ---------------------------------------------------------------- conversations
 
-def create_conversation(user_id: str, title: str = "New conversation") -> str:
+def create_conversation(user_id: str, title: str = "New conversation",
+                        api_key_id: str | None = None) -> str:
     cid = new_id()
     conn = get_conn()
     conn.execute(
-        "INSERT INTO conversations (id, user_id, title, created_at, updated_at) VALUES (?,?,?,?,?)",
-        (cid, user_id, title, now(), now()),
+        "INSERT INTO conversations (id, user_id, api_key_id, title, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?)",
+        (cid, user_id, api_key_id, title, now(), now()),
     )
     conn.commit()
     return cid
@@ -599,13 +700,14 @@ def get_conversation(cid: str, user_id: str):
 
 
 def touch_conversation(cid: str, title: str | None = None) -> None:
+    conn = get_conn()
     if title:
-        get_conn().execute(
+        conn.execute(
             "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?", (title, now(), cid)
         )
     else:
-        get_conn().execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now(), cid))
-    get_conn().commit()
+        conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now(), cid))
+    conn.commit()
 
 
 def delete_conversation(cid: str, user_id: str) -> bool:
@@ -634,6 +736,134 @@ def get_messages(cid: str):
         d["sources"] = json.loads(d["sources"]) if d["sources"] else []
         out.append(d)
     return out
+
+
+def chunks_text(doc_id: str) -> str:
+    """A document's text, reassembled from its chunks (data export)."""
+    rows = get_conn().execute(
+        "SELECT content FROM chunks WHERE doc_id = ? ORDER BY idx", (doc_id,)
+    ).fetchall()
+    return "\n\n".join(r["content"] for r in rows)
+
+
+# ---------------------------------------------------------------- usage meter
+# Append-only request log for capacity planning and per-key reporting.
+
+def add_usage_event(user_id: str, *, api_key_id: str | None = None, source: str = "web",
+                    model: str = "", prompt_tokens: int = 0, completion_tokens: int = 0,
+                    contexts: int = 0, latency_ms: int = 0, status: str = "ok") -> str:
+    eid = new_id()
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO usage_events (id, user_id, api_key_id, source, model, prompt_tokens, "
+        "completion_tokens, contexts, latency_ms, status, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (eid, user_id, api_key_id, source, model, int(prompt_tokens), int(completion_tokens),
+         int(contexts), int(latency_ms), status, now()),
+    )
+    conn.commit()
+    return eid
+
+
+def _usage_where(user_id: str, since: float | None, api_key_id: str | None):
+    where, params = " WHERE user_id = ?", [user_id]
+    if since:
+        where += " AND created_at >= ?"
+        params.append(since)
+    if api_key_id:
+        where += " AND api_key_id = ?"
+        params.append(api_key_id)
+    return where, params
+
+
+def usage_totals(user_id: str, since: float | None = None,
+                 api_key_id: str | None = None) -> dict:
+    where, params = _usage_where(user_id, since, api_key_id)
+    row = get_conn().execute(
+        "SELECT COUNT(*) requests, "
+        "COALESCE(SUM(prompt_tokens), 0) prompt_tokens, "
+        "COALESCE(SUM(completion_tokens), 0) completion_tokens, "
+        "COALESCE(SUM(prompt_tokens + completion_tokens), 0) total_tokens, "
+        "COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0) errors"
+        " FROM usage_events" + where,
+        params,
+    ).fetchone()
+    return dict(row)
+
+
+def usage_daily(user_id: str, since: float | None = None, api_key_id: str | None = None):
+    """One row per local calendar day, for the trend line."""
+    where, params = _usage_where(user_id, since, api_key_id)
+    rows = get_conn().execute(
+        "SELECT strftime('%Y-%m-%d', created_at, 'unixepoch', 'localtime') day, "
+        "COUNT(*) requests, "
+        "COALESCE(SUM(prompt_tokens), 0) prompt_tokens, "
+        "COALESCE(SUM(completion_tokens), 0) completion_tokens"
+        " FROM usage_events" + where +
+        " GROUP BY day ORDER BY day",
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def usage_by_key(user_id: str, since: float | None = None):
+    """Per-key split — which integration spent what."""
+    where, params = _usage_where(user_id, since, None)
+    rows = get_conn().execute(
+        "SELECT api_key_id, source, COUNT(*) requests, "
+        "COALESCE(SUM(prompt_tokens), 0) prompt_tokens, "
+        "COALESCE(SUM(completion_tokens), 0) completion_tokens"
+        " FROM usage_events" + where +
+        " GROUP BY api_key_id, source ORDER BY requests DESC",
+        params,
+    ).fetchall()
+    out = []
+    for r in rows:
+        item = dict(r)
+        key_row = None
+        if item["api_key_id"]:
+            key_row = get_conn().execute(
+                "SELECT prefix, label FROM api_keys WHERE id = ?", (item["api_key_id"],)
+            ).fetchone()
+        item["key_prefix"] = (key_row["prefix"] + "…") if key_row else None
+        item["key_label"] = (key_row["label"] or None) if key_row else None
+        if item["api_key_id"] and not key_row:
+            item["revoked"] = True
+        out.append(item)
+    return out
+
+
+# ---------------------------------------------------------------- audit log
+
+def add_audit_event(actor_id: str | None, actor_email: str, action: str,
+                    target_type: str = "", target_id: str = "",
+                    detail: str | None = None, ip: str = "") -> str:
+    row_id = new_id()
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO audit_log (id, actor_id, actor_email, action, target_type, "
+        "target_id, detail, ip, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (row_id, actor_id, actor_email, action, target_type or None,
+         target_id or None, detail, ip or None, now()),
+    )
+    conn.commit()
+    return row_id
+
+
+def list_audit_events(since: float | None = None, limit: int = 200, action: str = ""):
+    where, params = " WHERE 1 = 1", []
+    if since:
+        where += " AND created_at >= ?"
+        params.append(since)
+    if action:
+        where += " AND action = ?"
+        params.append(action)
+    rows = get_conn().execute(
+        "SELECT id, actor_id, actor_email, action, target_type, target_id, detail, ip, created_at "
+        "FROM audit_log" + where + " ORDER BY created_at DESC LIMIT ?",
+        [*params, max(1, min(int(limit), 1000))],
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # admin stats

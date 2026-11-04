@@ -178,3 +178,70 @@ def test_file_library_has_navigable_folders():
     assert len(re.findall(r'"lib\.folderDelPlain":', js)) == 2
     assert len(re.findall(r'"lib\.folderDelSub":', js)) == 2
 
+
+def test_settings_dialog_wires_account_and_audit():
+    """The on-premise settings dialog: audit + account, nothing else.
+
+    Members, invitations, roles and multiple knowledge bases were removed;
+    this keeps the load-time wiring of what is left from going missing.
+    """
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    app = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    for hook in (
+        "ws-modal", "ws-btn", "ws-close", "ws-head-org", "ws-tab-audit",
+        "ws-tab-account", "ws-audit-list", "ws-pass-form", "ws-export",
+        "ws-del-account", "notice-banner", "notice-text",
+    ):
+        assert f'id="{hook}"' in html, hook
+    assert (html.count('data-ws-tab=')) == 2  # audit + account only
+
+    for route in (
+        '"/api/audit', '"/api/export"', '"/api/account"',
+        '"/api/auth/change-password"', '"/api/auth/sessions/revoke"',
+    ):
+        assert route in app, route
+    for removed in (
+        '"/api/org"', '"/api/kbs"', '"/api/org/invites"',
+        'ws-member-list', 'ws-invite-form', 'lib-kb', 'ws-del-org',
+        'ws-tab-members', 'ws-tab-kbs',
+    ):
+        assert removed not in html and removed not in app, removed
+    assert 'fetch("/api/export"' in app
+    assert '$("#ws-head-org").textContent' in app
+
+
+def test_settings_dialog_keeps_the_two_column_layout():
+    """The rail/grid fix must survive the removal of two panes."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    css = (STATIC / "styles.css").read_text(encoding="utf-8")
+    js = (STATIC / "i18n.js").read_text(encoding="utf-8")
+
+    assert 'id="ws-main"' in html
+    assert "#int-main.int-layout, #ws-main.int-layout" in css
+    assert "#ws-main.int-layout { grid-template-columns: 176px minmax(0, 1fr)" in css
+    assert "min-height: min(620px" in css
+    assert '.ed-row input[type="password"], .ed-row input[type="email"]' in css
+    assert "grid-template-columns: 128px minmax(0, 1fr) minmax(0, 1.4fr)" in css
+    assert ".ws-danger-sec .btn-danger" in css
+    assert len(re.findall(r'"st\.admin":', js)) == 2
+    assert len(re.findall(r'"ws\.title":', js)) == 2
+
+
+def test_auth_screen_has_no_hosted_account_links():
+    """No verification mails, reset links or invitation hashes on-premise."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    app = (STATIC / "app.js").read_text(encoding="utf-8")
+    js = (STATIC / "i18n.js").read_text(encoding="utf-8")
+
+    assert 'id="auth-forgot-btn"' not in html
+    assert 'id="verify-banner"' not in html
+    assert 'id="notice-banner"' in html
+    for marker in (
+        "handleHashRoute", 'route === "invite"', "/api/auth/verify-email",
+        "/api/auth/forgot-password", "/api/auth/reset-password",
+        "kb_id: state.libKb", 'fd.append("kb_id"',
+    ):
+        assert marker not in app, marker
+    for key in ("auth.forgot", "auth.verifyHint", "ws.tab.members", "ws.tab.kbs"):
+        assert len(re.findall(rf'"{re.escape(key)}":', js)) == 0, key

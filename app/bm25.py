@@ -1,8 +1,8 @@
-"""BM25 lexical retrieval with per-user in-memory index and caching.
+"""BM25 lexical retrieval with a per-user in-memory index and caching.
 
-The index is built lazily on first query and invalidated whenever the user's
-document/chunk counts change (uploads and deletions). Tokenization is shared
-with the demo embedding provider: latin words + CJK bigrams.
+The index is built lazily on first query and invalidated whenever the
+user's document/chunk counts change (uploads and deletions). Tokenization
+is shared with the demo embedding provider: latin words + CJK bigrams.
 """
 import hashlib
 import math

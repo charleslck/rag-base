@@ -16,6 +16,8 @@ services:
       # leave RAGBASE_JWT_SECRET empty and the entrypoint generates + persists one
       RAGBASE_JWT_SECRET: ${RAGBASE_JWT_SECRET:-}
       RAGBASE_ALLOW_REGISTRATION: ${RAGBASE_ALLOW_REGISTRATION:-true}
+      RAGBASE_LOGIN_MAX_ATTEMPTS: ${RAGBASE_LOGIN_MAX_ATTEMPTS:-5}
+      RAGBASE_LOGIN_WINDOW_SECONDS: ${RAGBASE_LOGIN_WINDOW_SECONDS:-900}
 
       # chat model — any OpenAI-compatible endpoint
       RAGBASE_LLM_API_KEY: ${RAGBASE_LLM_API_KEY:-}
@@ -34,6 +36,14 @@ services:
       RAGBASE_CHUNK_OVERLAP: ${RAGBASE_CHUNK_OVERLAP:-150}
       RAGBASE_TOP_K: ${RAGBASE_TOP_K:-6}
       RAGBASE_RETRIEVAL_THRESHOLD: ${RAGBASE_RETRIEVAL_THRESHOLD:-0.15}
+
+      # usage meter — prices per million tokens, 0 reports tokens only
+      RAGBASE_PRICE_PER_MTOK_IN: ${RAGBASE_PRICE_PER_MTOK_IN:-0}
+      RAGBASE_PRICE_PER_MTOK_OUT: ${RAGBASE_PRICE_PER_MTOK_OUT:-0}
+
+      # background ingestion: documents embed off the request path
+      RAGBASE_INGEST_WORKERS: ${RAGBASE_INGEST_WORKERS:-2}
+      RAGBASE_INGEST_BATCH: ${RAGBASE_INGEST_BATCH:-64}
     volumes:
       # named volume: survive `docker compose down`
       - ragbase-data:/app/data

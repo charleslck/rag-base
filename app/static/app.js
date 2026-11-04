@@ -35,6 +35,9 @@ const state = {
   moving: null, // target folder picked in the move dialog
   uploading: false,
   uploadTimer: null,
+  libPoll: null, // timer that re-reads the library while uploads index
+  me: null, // /api/me payload
+  wsTab: "audit", // which rail tab the settings dialog shows
 };
 
 /* ---------------- helpers ---------------- */
@@ -129,6 +132,12 @@ $("#auth-form").addEventListener("submit", async (e) => {
   }
 });
 
+/* A transient message strip above everything (password changed, etc.). */
+function showNotice(text) {
+  $("#notice-text").textContent = text;
+  $("#notice-banner").classList.remove("hidden");
+}
+
 function logout() {
   state.token = null;
   state.conversationId = null;
@@ -155,6 +164,7 @@ async function boot() {
   if (!state.token) return showAuth();
   try {
     const me = await api("/api/me");
+    state.me = me;
     $("#user-email").textContent = me.email;
     state.banner = me.demo_mode ? "demo" : me.embedding_local ? "embedding" : null;
     state.bannerModel = me.model;
@@ -235,13 +245,18 @@ $("#int-modal").addEventListener("click", (e) => {
   if (e.target === $("#int-modal")) closeIntegrate(); // click the dimmed backdrop
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && integrateOpen()) {
-    e.preventDefault();
-    if (state.editingKey) {
-      closeEditor();
-      loadKeys();
-    } else {
-      closeIntegrate();
+  if (e.key === "Escape") {
+    if (integrateOpen()) {
+      e.preventDefault();
+      if (state.editingKey) {
+        closeEditor();
+        loadKeys();
+      } else {
+        closeIntegrate();
+      }
+    } else if (wsOpen()) {
+      e.preventDefault();
+      closeWorkspace();
     }
   }
 });
@@ -1008,7 +1023,10 @@ function tileHTML(doc, idx) {
   const meta = doc.status === "ready"
     ? esc(t(doc.num_chunks === 1 ? "kb.chunkOne" : "kb.chunks", { n: doc.num_chunks })) +
       " · " + esc(fmtTime(doc.created_at))
-    : '<span class="tile-err">' + esc(doc.error || t("err.failed")) + "</span>";
+    : doc.status === "processing"
+      ? '<span class="tile-work"><span class="tile-spin" aria-hidden="true"></span>' +
+        esc(t("kb.processing")) + "</span>"
+      : '<span class="tile-err">' + esc(doc.error || t("err.failed")) + "</span>";
   // a search crosses folders, so say which one a hit came from. It gets its own
   // line: appended to the meta line it would always be the part that gets cut.
   const where = state.libQuery.trim() && doc.folder_id && folderById(doc.folder_id)
@@ -1039,6 +1057,23 @@ async function loadLibrary() {
   if (state.libFolder && !folderById(state.libFolder)) state.libFolder = null;
   renderDocCount();
   renderLibrary();
+  scheduleLibraryPoll();
+}
+
+/* Uploads index in the background, so a fresh tile says "indexing…" and the
+   grid re-reads itself until every tile is ready. One shared timer: a second
+   upload, a folder switch or a search never stacks a second poller. */
+function scheduleLibraryPoll() {
+  if (state.libPoll) { clearTimeout(state.libPoll); state.libPoll = null; }
+  if (!state.token || !state.libDocs.some((d) => d.status === "processing")) return;
+  state.libPoll = setTimeout(async () => {
+    state.libPoll = null;
+    try {
+      await loadLibrary();
+    } catch {
+      // offline or logged out: the next visit or upload starts polling again
+    }
+  }, 1500);
 }
 
 function renderDocCount() {
@@ -1938,6 +1973,137 @@ async function sendMessage(text) {
   }
 }
 
+/* ---------------- settings modal ---------------- */
+/* Two panes: the instance audit trail and account controls. No team/member
+   management in an on-premise install — accounts are created by the operator. */
+
+function wsOpen() { return !$("#ws-modal").classList.contains("hidden"); }
+
+function openWorkspace() {
+  if (wsOpen()) return;
+  state.lastFocus = document.activeElement;
+  $("#ws-modal").classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  const me = state.me || {};
+  $("#ws-head-org").textContent =
+    (me.email || "") + " · " + t(me.is_admin ? "st.admin" : "st.user");
+  showWsTab(state.wsTab);
+  if (state.wsTab === "audit") loadAudit().catch(() => {});
+  $("#ws-close").focus();
+}
+
+function closeWorkspace() {
+  if (!wsOpen()) return;
+  $("#ws-modal").classList.add("hidden");
+  document.body.classList.remove("modal-open");
+  if (state.lastFocus && state.lastFocus.isConnected) state.lastFocus.focus();
+  state.lastFocus = null;
+}
+
+$("#ws-btn").addEventListener("click", openWorkspace);
+$("#ws-close").addEventListener("click", closeWorkspace);
+$("#ws-modal").addEventListener("click", (e) => {
+  if (e.target === $("#ws-modal")) closeWorkspace();
+});
+
+function showWsTab(name) {
+  state.wsTab = name;
+  document.querySelectorAll("#ws-modal [data-ws-tab]").forEach((tab) => {
+    const on = tab.dataset.wsTab === name;
+    tab.classList.toggle("active", on);
+    tab.setAttribute("aria-selected", String(on));
+  });
+  document.querySelectorAll("#ws-modal .int-pane").forEach((pane) => {
+    pane.classList.toggle("active", pane.id === "ws-pane-" + name);
+  });
+}
+document.querySelectorAll("#ws-modal [data-ws-tab]").forEach((tab) =>
+  tab.addEventListener("click", () => {
+    showWsTab(tab.dataset.wsTab);
+    if (tab.dataset.wsTab === "audit") loadAudit().catch(() => {});
+  }));
+
+async function loadAudit() {
+  const data = await api("/api/audit?days=30&limit=200");
+  const box = $("#ws-audit-list");
+  if (!data.events.length) {
+    box.innerHTML = '<p class="dim">' + esc(t("ws.auditEmpty")) + "</p>";
+    return;
+  }
+  box.innerHTML = data.events.map((ev) => {
+    const what = t("ws.ev." + ev.action) !== "ws.ev." + ev.action
+      ? t("ws.ev." + ev.action) : ev.action;
+    return '<div class="ws-audit-row"><span class="dim">' + esc(fmtTime(ev.created_at)) +
+      "</span><strong>" + esc(ev.actor_email) + "</strong><span>" + esc(what) +
+      (ev.detail ? ' <span class="dim">· ' + esc(ev.detail) + "</span>" : "") +
+      "</span></div>";
+  }).join("");
+}
+
+/* ---------- account pane ---------- */
+$("#ws-pass-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    const data = await api("/api/auth/change-password", {
+      method: "POST",
+      body: {
+        current_password: $("#ws-pass-current").value,
+        new_password: $("#ws-pass-new").value,
+      },
+    });
+    // the server just revoked every old session: adopt the replacement token
+    state.token = data.token;
+    localStorage.setItem("ragbase_token", data.token);
+    $("#ws-pass-current").value = "";
+    $("#ws-pass-new").value = "";
+    showNotice(t("ws.acc.changed"));
+  } catch (ex) {
+    alert(ex.message);
+  }
+});
+
+$("#ws-logout-all").addEventListener("click", async () => {
+  try {
+    await api("/api/auth/sessions/revoke", { method: "POST", body: {} });
+    closeWorkspace();
+    logout();
+  } catch (ex) {
+    alert(ex.message);
+  }
+});
+
+$("#ws-export").addEventListener("click", async () => {
+  try {
+    const res = await fetch("/api/export", {
+      headers: { Authorization: "Bearer " + state.token },
+    });
+    if (!res.ok) throw new Error(t("err.request", { status: res.status }));
+    const disposition = res.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="([^"]+)"/);
+    const url = URL.createObjectURL(await res.blob());
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = match ? match[1] : "ragbase-export.json";
+    link.click();
+    URL.revokeObjectURL(url);
+  } catch (ex) {
+    alert(ex.message);
+  }
+});
+
+$("#ws-del-account").addEventListener("click", async () => {
+  const pass = $("#ws-del-pass").value;
+  if (!pass) return;
+  if (!(await confirmDialog(t("ws.acc.deleteAccount"), t("ws.acc.deleteHint"), t("ws.acc.deleteGo")))) return;
+  try {
+    await api("/api/account", { method: "DELETE", body: { password: pass } });
+    closeWorkspace();
+    logout();
+  } catch (ex) {
+    alert(ex.message);
+  }
+});
+
 /* ---------------- language ---------------- */
 function refreshForLang() {
   applyI18n();
@@ -1954,6 +2120,7 @@ function refreshForLang() {
     renderApiDocs();
     if (state.editingKey) updateDocScope(); // its counter is built with t()
   }
+  if (wsOpen() && state.wsTab === "audit") loadAudit().catch(() => {});
   if (state.streaming) return; // don't clobber an answer that is still streaming
   if (state.conversationId) {
     api("/api/conversations/" + state.conversationId + "/messages")

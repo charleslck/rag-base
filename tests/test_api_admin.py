@@ -84,13 +84,16 @@ def test_non_admins_cannot_reset_passwords(client, user):
     assert login(client, "user@example.com", "userpass123").status_code == 200
 
 
-def test_admin_sees_the_same_token_after_a_password_reset(client, admin):
-    # Existing sessions stay valid: the JWT is not revoked by a reset.
+def test_admin_reset_revokes_existing_sessions(client, admin):
+    # A password reset bumps the token version, so every JWT minted before it
+    # dies immediately — a reset means "something may be compromised".
     uid = db.get_user_by_email("admin@example.com")["id"]
     client.post(
         f"/api/admin/users/{uid}/reset-password", headers=admin["headers"], json={"new_password": "adminpass456"}
     )
-    assert client.get("/api/me", headers=admin["headers"]).status_code == 200
+    assert client.get("/api/me", headers=admin["headers"]).status_code == 401
+    fresh = login(client, "admin@example.com", "adminpass456")
+    assert fresh.status_code == 200
 
 
 def test_password_reset_through_the_service_layer(client, user):
@@ -99,4 +102,5 @@ def test_password_reset_through_the_service_layer(client, user):
     db.update_password(uid, auth.hash_password("recovered123"))
 
     assert login(client, "user@example.com", "recovered123").status_code == 200
-    assert client.get("/api/me", headers=bearer(user["token"])).status_code == 200
+    # a reset also revokes the sessions issued before it
+    assert client.get("/api/me", headers=bearer(user["token"])).status_code == 401

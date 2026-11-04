@@ -45,6 +45,7 @@
 <!-- ============ App view ============ -->
 <div id="app-view" class="app-view hidden">
   <div id="demo-banner" class="demo-banner hidden"></div>
+  <div id="notice-banner" class="demo-banner notice-banner hidden"><span id="notice-text"></span></div>
 
   <header class="topbar">
     <button class="icon-btn" id="menu-btn" data-i18n-title="nav.toggleSidebar">
@@ -52,6 +53,9 @@
     </button>
     <div class="topbar-brand">RAGbase</div>
     <div class="topbar-right">
+      <button class="icon-btn" id="ws-btn" data-i18n-title="ws.title">
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="3" stroke="currentColor" stroke-width="1.6"/><path d="M10 2v2.4M10 15.6V18M2 10h2.4M15.6 10H18M4.3 4.3l1.7 1.7M14 14l1.7 1.7M15.7 4.3L14 6M6 14l-1.7 1.7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
       <button class="icon-btn lang-btn" id="lang-btn" type="button" data-i18n-title="lang.switch">
         <span id="lang-label">中文</span>
       </button>
@@ -480,6 +484,78 @@
             </div>
           </aside>
         </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Workspace modal ============ -->
+<div class="modal-backdrop hidden" id="ws-modal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="ws-modal-title">
+    <div class="modal-head">
+      <h3 id="ws-modal-title" data-i18n="ws.title">Settings</h3>
+      <span class="ws-head-org" id="ws-head-org"></span>
+      <button class="icon-btn modal-close" id="ws-close" type="button" data-i18n-title="int.close">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="modal-body int-layout" id="ws-main">
+      <div class="int-nav" role="tablist" aria-orientation="vertical" data-i18n-title="ws.navAria">
+        <button class="int-tab active" id="ws-tab-audit" type="button" role="tab"
+                aria-selected="true" aria-controls="ws-pane-audit" data-ws-tab="audit">
+          <span class="int-dot"></span><span data-i18n="ws.tab.audit">Audit log</span>
+        </button>
+        <button class="int-tab" id="ws-tab-account" type="button" role="tab" tabindex="-1"
+                aria-selected="false" aria-controls="ws-pane-account" data-ws-tab="account">
+          <span class="int-dot"></span><span data-i18n="ws.tab.account">Account</span>
+        </button>
+      </div>
+
+      <div class="int-panes">
+        <!-- ---------- audit ---------- -->
+        <section class="int-pane active" id="ws-pane-audit" role="tabpanel" tabindex="0">
+          <p class="dim" data-i18n="ws.auditHint">Who did what, kept for the last 30 days.</p>
+          <div class="ws-audit" id="ws-audit-list"></div>
+        </section>
+
+        <!-- ---------- account ---------- -->
+        <section class="int-pane" id="ws-pane-account" role="tabpanel" tabindex="0">
+          <section class="ed-sec">
+            <h4 data-i18n="ws.acc.security">Security</h4>
+            <form id="ws-pass-form">
+              <label class="ed-row">
+                <span data-i18n="ws.acc.current">Current password</span>
+                <input type="password" id="ws-pass-current" autocomplete="current-password" required />
+              </label>
+              <label class="ed-row">
+                <span data-i18n="ws.acc.new">New password</span>
+                <input type="password" id="ws-pass-new" autocomplete="new-password" required minlength="6" />
+              </label>
+              <div class="ws-actions">
+                <button type="submit" class="btn-primary btn-small" data-i18n="ws.acc.change">Change password</button>
+                <button type="button" class="btn-secondary btn-small" id="ws-logout-all" data-i18n="ws.acc.logoutAll">Sign out everywhere</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="ed-sec">
+            <h4 data-i18n="ws.acc.data">Your data</h4>
+            <p class="ed-hint" data-i18n="ws.acc.exportHint">Download everything this account owns as JSON.</p>
+            <div class="ws-actions">
+              <button type="button" class="btn-secondary btn-small" id="ws-export" data-i18n="ws.acc.export">Export data</button>
+            </div>
+          </section>
+
+          <section class="ed-sec ws-danger-sec">
+            <h4 data-i18n="ws.acc.deleteAccount">Delete account</h4>
+            <p class="ed-hint" data-i18n="ws.acc.deleteHint">Deletes this account and everything it owns. This cannot be undone.</p>
+            <div class="ws-actions">
+              <input type="password" id="ws-del-pass" data-i18n-ph="auth.password.ph" placeholder="6+ characters" />
+              <button type="button" class="btn-danger btn-small" id="ws-del-account" data-i18n="ws.acc.deleteGo">Delete my account</button>
+            </div>
+          </section>
+
+        </section>
       </div>
     </div>
   </div>

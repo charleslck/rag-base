@@ -45,6 +45,10 @@ class Settings:
     jwt_expire_hours: int = int(os.environ.get("RAGBASE_JWT_EXPIRE_HOURS", "72"))
     allow_registration: bool = _bool("RAGBASE_ALLOW_REGISTRATION", True)
 
+    # --- Login throttle (failed attempts per email + IP inside the window) ---
+    login_max_attempts: int = int(os.environ.get("RAGBASE_LOGIN_MAX_ATTEMPTS", "5"))
+    login_window_seconds: int = int(os.environ.get("RAGBASE_LOGIN_WINDOW_SECONDS", "900"))
+
     # --- Chat model (any OpenAI-compatible endpoint) ---
     # No key => demo mode: a local extractive engine answers from the
     # retrieved chunks so the full product flow works without any API.
@@ -64,6 +68,21 @@ class Settings:
     embedding_base_url: str = os.environ.get("RAGBASE_EMBEDDING_BASE_URL", "https://api.openai.com/v1")
     embedding_model: str = os.environ.get("RAGBASE_EMBEDDING_MODEL", "text-embedding-3-small")
     embedding_dim: int = int(os.environ.get("RAGBASE_EMBEDDING_DIM", "1536"))
+
+    # --- Usage meter ---
+    # Prices are only used to turn recorded tokens into money on /api/usage;
+    # leaving them at 0 keeps the meter in tokens, which is what the product
+    # shows by default. Set them to your provider's rate per million tokens.
+    price_per_mtok_in: float = float(os.environ.get("RAGBASE_PRICE_PER_MTOK_IN", "0"))
+    price_per_mtok_out: float = float(os.environ.get("RAGBASE_PRICE_PER_MTOK_OUT", "0"))
+
+    # --- Ingestion ---
+    # Uploads parse in the request (so a broken file fails fast) but embed in a
+    # background pool: a 200-chunk PDF must not hold the connection — or the
+    # event loop — while the embedding API works through it.
+    ingest_sync: bool = _bool("RAGBASE_INGEST_SYNC", False)
+    ingest_workers: int = int(os.environ.get("RAGBASE_INGEST_WORKERS", "2"))
+    ingest_batch: int = int(os.environ.get("RAGBASE_INGEST_BATCH", "64"))
 
     # --- Limits ---
     max_docs_per_user: int = int(os.environ.get("RAGBASE_MAX_DOCS_PER_USER", "0"))  # 0 = unlimited

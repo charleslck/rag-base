@@ -16,6 +16,7 @@ import time
 
 import numpy as np
 
+from . import usage as usage_module
 from .config import settings
 
 _stopwords = set(
@@ -239,25 +240,76 @@ def ensure_vector_compatibility() -> int:
     return total
 
 
-def chat_once(messages: list[dict], contexts: list[dict] | None = None) -> str:
+def chat_once(messages: list[dict], contexts: list[dict] | None = None,
+              usage=None) -> str:
+    """One non-streaming completion. `usage`, when given, is filled in place."""
     if settings.chat_demo:
         q = messages[-1]["content"] if messages else ""
-        return DemoChat().answer(q, contexts or [])
+        text = DemoChat().answer(q, contexts or [])
+        if usage is not None:
+            usage.prompt_tokens = usage_module.estimate_messages(messages)
+            usage.completion_tokens = usage_module.estimate_tokens(text)
+        return text
     client = _get_chat_client()
     resp = client.chat.completions.create(model=settings.llm_model, messages=messages, temperature=0.2)
+    if usage is not None:
+        _absorb_usage(usage, getattr(resp, "usage", None), messages, resp.choices[0].message.content or "")
     return resp.choices[0].message.content or ""
 
 
-def chat_stream(messages: list[dict], contexts: list[dict] | None = None):
+def _absorb_usage(usage, reported, messages: list[dict], completion: str) -> None:
+    """Take the provider's numbers when it gives them, estimate otherwise."""
+    prompt = getattr(reported, "prompt_tokens", None)
+    completion_tokens = getattr(reported, "completion_tokens", None)
+    if prompt:
+        usage.prompt_tokens = int(prompt)
+        usage.measured = True
+    else:
+        usage.prompt_tokens = usage_module.estimate_messages(messages)
+    if completion_tokens:
+        usage.completion_tokens = int(completion_tokens)
+        usage.measured = True
+    else:
+        usage.completion_tokens = usage_module.estimate_tokens(completion)
+
+
+def _open_stream(client, messages: list[dict]):
+    """Ask for the usage chunk, tolerating providers that reject the option."""
+    kwargs = {"model": settings.llm_model, "messages": messages, "temperature": 0.2, "stream": True}
+    try:
+        return client.chat.completions.create(**kwargs, stream_options={"include_usage": True})
+    except TypeError:
+        # older/partial OpenAI-compatible servers raise on unknown kwargs
+        return client.chat.completions.create(**kwargs)
+
+
+def chat_stream(messages: list[dict], contexts: list[dict] | None = None, usage=None):
     if settings.chat_demo:
         q = messages[-1]["content"] if messages else ""
-        yield from DemoChat().stream(DemoChat().answer(q, contexts or []))
+        text = DemoChat().answer(q, contexts or [])
+        if usage is not None:
+            usage.prompt_tokens = usage_module.estimate_messages(messages)
+            usage.completion_tokens = usage_module.estimate_tokens(text)
+        yield from DemoChat().stream(text)
         return
     client = _get_chat_client()
-    stream = client.chat.completions.create(
-        model=settings.llm_model, messages=messages, temperature=0.2, stream=True
-    )
-    for event in stream:
-        delta = event.choices[0].delta.content if event.choices else None
-        if delta:
-            yield delta
+    stream = _open_stream(client, messages)
+    parts: list[str] = []
+    measured = False
+    try:
+        for event in stream:
+            reported = getattr(event, "usage", None)
+            if reported is not None and usage is not None:
+                _absorb_usage(usage, reported, messages, "")
+                measured = bool(getattr(reported, "prompt_tokens", None)
+                                or getattr(reported, "completion_tokens", None))
+            delta = event.choices[0].delta.content if event.choices else None
+            if delta:
+                parts.append(delta)
+                yield delta
+    finally:
+        # runs on normal exhaustion and on client disconnect alike, so a
+        # half-delivered answer is still metered for what it produced
+        if usage is not None and not measured:
+            usage.prompt_tokens = usage.prompt_tokens or usage_module.estimate_messages(messages)
+            usage.completion_tokens = usage_module.estimate_tokens("".join(parts))

@@ -289,39 +289,58 @@ def _sources_payload(contexts: list[dict]) -> list[dict]:
 
 
 def answer_stream(user_id: str, question: str, history: list[dict],
-                  doc_ids: list[str] | None = None, fallback: str = ""):
+                  doc_ids: list[str] | None = None, fallback: str = "", usage=None):
     """Yield (token, event) tuples. Final event carries the sources list.
 
     `fallback`, when set by an embed's config, is returned verbatim instead of
     calling the model on an empty retrieval — it keeps the customer's own
     "sorry, not covered" wording and saves a pointless completion.
+
+    `usage`, when given, is filled in place so the caller can meter the answer.
     """
     breadth, inventory = _search(user_id, question, doc_ids)
     contexts = retrieve(user_id, question, doc_ids=doc_ids, breadth=breadth)
+    if usage is not None:
+        usage.contexts = len(contexts)
     if not contexts and not inventory and fallback:
+        if usage is not None:
+            usage.status = "fallback"
         yield ("delta", fallback)
         yield ("done", [])
         return
     has_docs = bool(doc_ids) or db.doc_count_for_user(user_id) > 0
     messages = build_messages(question, contexts, history, has_docs, inventory)
+    # passed as a kwarg only when someone is metering: a provider-like callable
+    # with the original two-argument signature keeps working
+    meter = {"usage": usage} if usage is not None else {}
     try:
-        for token in providers.chat_stream(messages, contexts):
+        for token in providers.chat_stream(messages, contexts, **meter):
             yield ("delta", token)
     except Exception:
+        if usage is not None:
+            usage.status = "error"
         yield ("delta", "\n\n[Model request failed — check the LLM key / base URL / model settings in .env.]")
     yield ("done", _sources_payload(contexts))
 
 
 def answer_once(user_id: str, question: str, history: list[dict],
-                doc_ids: list[str] | None = None, fallback: str = "") -> tuple[str, list[dict]]:
+                doc_ids: list[str] | None = None, fallback: str = "",
+                usage=None) -> tuple[str, list[dict]]:
     breadth, inventory = _search(user_id, question, doc_ids)
     contexts = retrieve(user_id, question, doc_ids=doc_ids, breadth=breadth)
+    if usage is not None:
+        usage.contexts = len(contexts)
     if not contexts and not inventory and fallback:
+        if usage is not None:
+            usage.status = "fallback"
         return fallback, []
     has_docs = bool(doc_ids) or db.doc_count_for_user(user_id) > 0
     messages = build_messages(question, contexts, history, has_docs, inventory)
+    meter = {"usage": usage} if usage is not None else {}
     try:
-        text = providers.chat_once(messages, contexts)
+        text = providers.chat_once(messages, contexts, **meter)
     except Exception:
+        if usage is not None:
+            usage.status = "error"
         text = "[Model request failed — check the LLM key / base URL / model settings in .env.]"
     return text, _sources_payload(contexts)

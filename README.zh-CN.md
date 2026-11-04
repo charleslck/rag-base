@@ -316,6 +316,42 @@ curl -X PATCH https://your-host/api/admin/api-keys/KEY_ID/plan \
 
 ![嵌入网站](docs/hero_2_integration.png)
 
+## 用量计量
+
+每次回答都会往 `usage_events` 写一行：输入/输出 token、是哪个 API key 消耗的、是否走了兜底话术、耗时多少。provider 报了 `usage` 就用精确值（OpenAI SDK 非流式直接给，流式靠 `stream_options` 拿最后一帧），没报就按字符估算，所以演示模式和精简的第三方端点同样有账。
+
+```http
+GET /api/usage?days=30            Authorization: Bearer $TOKEN
+```
+
+返回 `totals`（请求数、进出 token、错误数、金额）、`daily`（按天趋势）、`by_key`（每个 key/来源各花了多少，带 key 前缀与备注名）。`cost` 由 `RAGBASE_PRICE_PER_MTOK_IN/OUT` 实时算出，调价只影响展示、不改历史数据。**撤销的 key 仍然保留用量**（`revoked: true`），因为账单要比 key 活得久。
+
+## 后台上传索引
+
+上传时只做解析与分块：文件读不出来必须当场报错。真正耗时的向量化交给后台线程池（`RAGBASE_INGEST_WORKERS`），接口直接返回 `"status": "processing"`，文件库轮询到 `ready` 才显示片段数：
+
+```json
+{"results": [{"filename": "合同.pdf", "ok": true, "chunks": 214,
+              "id": "…", "status": "processing"}]}
+```
+
+这是为了不让一次大文件上传冻住整个进程：向量化调用是阻塞的，放在请求里会把事件循环（连同其他人的对话）一起卡住直到上游返回。分块按 `RAGBASE_INGEST_BATCH` 分批写、每批一个事务；索引途中被删掉的文件会被整个丢弃；进程崩溃留下的 `processing` 行会在下次启动时标记为失败。
+
+## 私有化部署
+
+RAGbase 以自托管方式交付：一个放在客户内网的 SQLite 文件，一个账号对应一个知识库，
+不依赖外部服务，也没有托管计费。
+
+- **账号** —— 由实施人员创建，第一个注册的账号是管理员。
+  `RAGBASE_ALLOW_REGISTRATION=false` 可关闭后续注册。没有邀请、角色和邮箱验证；
+  忘记密码由管理员通过 `POST /api/admin/users/{id}/reset-password` 重置。
+- **安全** —— bcrypt 密码、带版本号的 JWT（改密码或「退出所有设备」会立即吊销旧会话）、
+  按（邮箱, IP）限流、以及按 key 的请求配额。
+- **运维** —— `GET /api/audit`（实例操作记录）、`GET /api/export`（账号全量 JSON 备份）、
+  `GET /api/usage`（token 用量，用于容量规划）、`DELETE /api/account`（注销账号）。
+- **交付** —— 挂件白标品牌、每个 key 的域名白名单、Docker 与健康检查，
+  备份时只需带走一个 `data/` 目录。
+
 ## 配置项
 
 所有配置都在 `.env`（见 [.env.example](.env.example)）：
@@ -328,6 +364,7 @@ curl -X PATCH https://your-host/api/admin/api-keys/KEY_ID/plan \
 | `RAGBASE_EMBEDDING_API_KEY` | — | 向量接口。留空则用本地 feature-hash 向量 + BM25 |
 | `RAGBASE_JWT_SECRET` | — | **生产环境务必更换**；Docker 下留空会自动生成并持久化 |
 | `RAGBASE_ALLOW_REGISTRATION` | `true` | 设为 `false` 后仅限邀请 |
+| `RAGBASE_LOGIN_MAX_ATTEMPTS` / `_WINDOW_SECONDS` | `5` / `900` | 同一（邮箱, IP）窗口内的失败登录上限 |
 | `RAGBASE_MAX_DOCS_PER_USER` | `0`（不限） | 每用户文档上限 |
 | `RAGBASE_MAX_UPLOAD_MB` | `25` | 单文件大小上限 |
 | `RAGBASE_CHUNK_SIZE` / `RAGBASE_CHUNK_OVERLAP` | `900` / `150` | 分块参数（字符数，中英通用） |
@@ -335,6 +372,10 @@ curl -X PATCH https://your-host/api/admin/api-keys/KEY_ID/plan \
 | `RAGBASE_LIST_TOP_K` | `20` | 库级问题（「有哪些」「列出」）的召回数；`0` 表示关闭放宽与文档清单 |
 | `RAGBASE_INVENTORY_DOCS` | `200` | prompt 里文档清单最多列多少份 |
 | `RAGBASE_CONTEXT_CHARS` | `24000` | 单次回答送进模型的检索正文总字符数（含清单） |
+| `RAGBASE_PRICE_PER_MTOK_IN` / `_OUT` | `0` | `/api/usage` 里 `cost` 的每百万 token 单价；`0` 表示只报 token |
+| `RAGBASE_INGEST_WORKERS` | `2` | 后台同时向量化几份文档 |
+| `RAGBASE_INGEST_BATCH` | `64` | 每次向量化调用 / 每个写事务包含的片段数 |
+| `RAGBASE_INGEST_SYNC` | `0` | 设为 `1` 时在请求内完成向量化（仅调试用） |
 | `RAGBASE_DATA_DIR` | `data` | SQLite 位置 |
 
 ## 部署
@@ -358,7 +399,7 @@ Restart=always
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                        # 326 个测试，约 45 秒
+pytest                                        # 463 个测试，约 80 秒
 pytest --cov=app --cov-report=term-missing    # 覆盖率
 ```
 
@@ -372,6 +413,10 @@ pytest --cov=app --cov-report=term-missing    # 覆盖率
 | BM25 打分、索引缓存、用户隔离、中文查询 | `tests/test_bm25.py` |
 | 检索、RRF 融合、prompt 组装、回答 | `tests/test_rag.py` |
 | HTTP：认证、文档、SSE 对话、会话、密钥与挂件、管理、静态资源与 CORS | `tests/test_api_*.py` |
+| 用量计量：估算、按 key 计费、时间窗口、金额、撤销的 key | `tests/test_usage.py` |
+| 账号安全：改密码、登录限流、token 吊销 | `tests/test_auth_flow.py` |
+| 合规出口：审计日志、数据导出、注销账号与工作区 | `tests/test_compliance.py` |
+| 后台索引：队列、分批、失败处理、重启恢复 | `tests/test_ingest_async.py` |
 | 运维 CLI（`python -m app.tools`） | `tests/test_tools_cli.py` |
 
 ## 架构
@@ -388,6 +433,10 @@ ragbase/
 │   ├── bm25.py             # 每用户词法索引，内存缓存
 │   ├── providers.py        # OpenAI / 演示引擎（向量 + 对话）、中英分词、向量迁移
 │   ├── rag.py              # 检索、RRF 融合、prompt 组装、带引用回答
+│   ├── ingest_jobs.py      # 上传后的后台向量化线程池
+│   ├── ratelimit.py        # 凭证接口的滑动窗口限流
+│   ├── audit.py            # 只追加的操作审计
+│   ├── usage.py            # token 计量：估算、金额、按 key 聚合
 │   └── tools.py            # 运维 CLI
 └── app/static/             # 前端（原生 JS，无构建）：i18n.js、app.js、styles.css
 ```

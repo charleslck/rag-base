@@ -44,6 +44,10 @@ os.environ.update(
         "RAGBASE_TOP_K": "6",
         "RAGBASE_RETRIEVAL_THRESHOLD": "0.15",
         "RAGBASE_EMBEDDING_DIM": "1536",
+        # Tests assert on the state of a document right after upload, so the
+        # background embedding pool runs inline here. test_ingest_async.py
+        # flips this off to exercise the queued path.
+        "RAGBASE_INGEST_SYNC": "1",
         # Offline demo mode: no chat model, no embedding API.
         "RAGBASE_LLM_API_KEY": "",
         "RAGBASE_LLM_BASE_URL": "",
@@ -56,7 +60,7 @@ os.environ.update(
 
 from starlette.testclient import TestClient  # noqa: E402  (must follow env setup)
 
-from app import bm25, database as db, providers, quota  # noqa: E402
+from app import bm25, database as db, providers, quota, ratelimit  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.main import app as fastapi_app  # noqa: E402
 from helpers import register  # noqa: E402
@@ -65,27 +69,43 @@ from helpers import register  # noqa: E402
 _TABLES_IN_DELETE_ORDER = (
     "messages",
     "conversations",
+    "usage_events",
     "api_keys",
+    "invites",
+    "auth_tokens",
+    "audit_log",
     "embeddings",
     "chunks",
     "documents",
     "folders",
+    "knowledge_bases",
+    "org_members",
+    "orgs",
     "users",
 )
+# older databases carry team/tenant tables that a fresh install never creates
+_PRESENT_TABLES = set()
+
 
 
 @pytest.fixture(autouse=True)
 def isolated_database():
     """Give every test an empty database and cold in-memory caches."""
     conn = db.get_conn()
+    if not _PRESENT_TABLES:
+        _PRESENT_TABLES.update(
+            r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        )
     for table in _TABLES_IN_DELETE_ORDER:
-        conn.execute(f"DELETE FROM {table}")
+        if table in _PRESENT_TABLES:
+            conn.execute(f"DELETE FROM {table}")
     conn.commit()
 
     bm25._cache.clear()
     providers._openai_client = None
     providers._chat_client = None
     quota.reset()  # request counters live in memory, not in the database
+    ratelimit.reset()  # login/forgot throttling is memory-backed too
     yield
 
 

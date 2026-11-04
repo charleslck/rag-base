@@ -321,7 +321,9 @@ def test_integration_sections_are_a_left_rail_of_tabs(client):
     assert re.findall(r'id="int-pane-([a-z]+)"', html) == names
 
     # exactly one pane starts visible, otherwise all three render at once again
-    assert html.count('class="int-pane active"') == 1
+    # (scoped to this modal: the workspace dialog reuses the same classes)
+    int_modal = html.split('id="int-modal"')[1].split('id="ws-modal"')[0]
+    assert int_modal.count('class="int-pane active"') == 1
     assert 'role="tablist"' in html
     # the old headings are gone — the labels live in the rail now
     assert "int-section" not in html

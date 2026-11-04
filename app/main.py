@@ -1,15 +1,24 @@
-"""RAGbase — FastAPI application: auth, document management, RAG chat (SSE)."""
+"""RAGbase — FastAPI application for an on-premise installation.
+
+One account owns one knowledge base. There is no tenant hierarchy, no invitations
+and no hosted billing: accounts are created by the operator, the first one is
+admin, and the whole thing runs on a single SQLite file inside the customer's
+network.
+"""
 import json
+import time
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
-from . import auth, database as db, ingest, providers, quota, rag, widget_config
+from . import audit, auth, database as db, ingest, ingest_jobs, providers, quota, rag, ratelimit
+from . import usage, widget_config
 from .config import settings
 
-app = FastAPI(title="RAGbase", version="1.0.0")
+app = FastAPI(title="RAGbase", version="1.2.0")
 
 
 def _cors_headers(origin: str) -> dict:
@@ -62,6 +71,10 @@ async def widget_cors(request: Request, call_next):
 @app.on_event("startup")
 def startup():
     db.init_db()
+    # a crash mid-ingest leaves rows in `processing` that no job will finish
+    stuck = db.fail_stuck_documents()
+    if stuck:
+        print(f"[ragbase] marked {stuck} interrupted upload(s) as failed")
     # local (demo) vectors are hashed from our own tokens: rebuild them once
     # after a tokenizer upgrade so existing knowledge bases stay searchable
     rebuilt = providers.ensure_vector_compatibility()
@@ -69,10 +82,22 @@ def startup():
         print(f"[ragbase] re-embedded {rebuilt} chunks for tokenizer v{providers.TOKENIZER_VERSION}")
 
 
+@app.on_event("shutdown")
+def shutdown():
+    """Let in-flight ingestion finish before the worker goes away."""
+    if ingest_jobs.pending():
+        ingest_jobs.wait_idle(timeout=30)
+
+
 @app.get("/api/health")
 def health():
     """Liveness probe for Docker/load balancers — must stay dependency-free."""
     return {"status": "ok", "version": app.version}
+
+
+def _client_ip(request: Request) -> str:
+    client = request.client
+    return client.host if client else ""
 
 
 # ---------------------------------------------------------------- auth
@@ -82,8 +107,25 @@ class RegisterIn(BaseModel):
     password: str = Field(min_length=6, max_length=128)
 
 
+class ChangePasswordIn(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=6, max_length=128)
+
+
+class ConfirmPasswordIn(BaseModel):
+    """Re-authentication for destructive actions (account deletion)."""
+    password: str
+
+
+def _auth_payload(user: dict, token: str) -> dict:
+    return {
+        "token": token,
+        "user": {"email": user["email"], "is_admin": bool(user["is_admin"])},
+    }
+
+
 @app.post("/api/auth/register")
-def register(body: RegisterIn):
+def register(body: RegisterIn, request: Request):
     email = body.email.strip().lower()
     if not auth.EMAIL_RE.match(email):
         raise HTTPException(400, "Invalid email address")
@@ -92,22 +134,59 @@ def register(body: RegisterIn):
         raise HTTPException(403, "Registration is disabled. Ask an admin to create your account.")
     if db.get_user_by_email(email):
         raise HTTPException(409, "An account with this email already exists")
-    user = db.create_user(email, auth.hash_password(body.password), is_admin=first_user)
-    return {
-        "token": auth.make_token(user["id"], user["is_admin"]),
-        "user": {"email": email, "is_admin": bool(user["is_admin"])},
-    }
+    db.create_user(email, auth.hash_password(body.password), is_admin=first_user)
+    user = db.get_user_by_email(email)
+    audit.record(user, "user.register", ip=_client_ip(request))
+    return _auth_payload(user, auth.make_token(user["id"], user["is_admin"], user["token_version"]))
 
 
 @app.post("/api/auth/login")
-def login(body: RegisterIn):
-    user = db.get_user_by_email(body.email.strip().lower())
+def login(body: RegisterIn, request: Request):
+    email = body.email.strip().lower()
+    ip = _client_ip(request)
+    key = f"login:{email}|{ip}"
+    allowed, retry = ratelimit.hit(key, settings.login_max_attempts, settings.login_window_seconds)
+    if not allowed:
+        raise HTTPException(
+            429, "Too many attempts — try again later.", headers={"Retry-After": str(retry)}
+        )
+    user = db.get_user_by_email(email)
     if not user or not auth.verify_password(body.password, user["password_hash"]):
+        audit.record({"email": email}, "login.failure", ip=ip)
         raise HTTPException(401, "Invalid email or password")
-    return {
-        "token": auth.make_token(user["id"], user["is_admin"]),
-        "user": {"email": user["email"], "is_admin": bool(user["is_admin"])},
-    }
+    ratelimit.clear(key)
+    audit.record(user, "login.success", ip=ip)
+    return _auth_payload(user, auth.make_token(user["id"], user["is_admin"], user["token_version"]))
+
+
+@app.post("/api/auth/change-password")
+def change_password(body: ChangePasswordIn, user: dict = Depends(auth.current_user)):
+    """Self-service password change; also revokes every older session."""
+    if not auth.verify_password(body.current_password, user["password_hash"]):
+        raise HTTPException(401, "Current password is wrong")
+    db.update_password(user["id"], auth.hash_password(body.new_password))
+    fresh = db.get_user_by_id(user["id"])
+    audit.record(fresh, "password.change")
+    return {"ok": True, "token": auth.make_token(fresh["id"], fresh["is_admin"], fresh["token_version"])}
+
+
+@app.post("/api/auth/sessions/revoke")
+def revoke_sessions(user: dict = Depends(auth.current_user)):
+    """Sign out every device: bumps the token version inside the JWTs."""
+    db.revoke_sessions(user["id"])
+    audit.record(user, "sessions.revoke")
+    return {"ok": True}
+
+
+@app.delete("/api/account")
+def delete_account(request: Request, body: ConfirmPasswordIn,
+                   user: dict = Depends(auth.current_user)):
+    """Delete this account and everything it owns (documents, chats, keys)."""
+    if not auth.verify_password(body.password, user["password_hash"]):
+        raise HTTPException(401, "Wrong password")
+    audit.record(user, "account.delete", ip=_client_ip(request))
+    db.delete_user(user["id"])
+    return {"ok": True}
 
 
 @app.get("/api/me")
@@ -120,6 +199,16 @@ def me(user: dict = Depends(auth.current_user)):
         "model": "demo-extractive" if settings.chat_demo else settings.llm_model,
         "max_docs": settings.max_docs_per_user,
     }
+
+
+@app.get("/api/usage")
+def account_usage(days: int = 30, user: dict = Depends(auth.current_user)):
+    """Token meter for this account: totals, daily series and per-key split.
+
+    Capacity planning for the operator, not a bill. `cost` is derived live from
+    RAGBASE_PRICE_PER_MTOK_IN/OUT; leave those at 0 to report tokens only.
+    """
+    return usage.summary(user["id"], days=days)
 
 
 # ---------------------------------------------------------------- status
@@ -140,12 +229,28 @@ def documents(user: dict = Depends(auth.current_user)):
     return {"documents": db.list_documents(user["id"])}
 
 
+def _prepare(filename: str, raw: bytes) -> list[str]:
+    """Parse and chunk one upload. Runs in a worker thread: pypdf is CPU-bound."""
+    text = ingest.extract_text(filename, raw)
+    chunks = ingest.chunk_text(text)
+    if not chunks:
+        raise ingest.ParseError("No readable text found in this file.")
+    return chunks
+
+
 @app.post("/api/documents")
 async def upload_documents(
     files: list[UploadFile] = File(...),
     folder_id: str = Form(""),
     user: dict = Depends(auth.current_user),
 ):
+    """Accept uploads, parse them now, embed them in the background.
+
+    Parsing stays on the request path so an unreadable file is reported
+    immediately and the chunk count is known up front. Embedding (the part that
+    calls out to a provider once per batch) is queued: the response says
+    `"status": "processing"` and the library polls until it turns `ready`.
+    """
     if settings.max_docs_per_user and db.doc_count_for_user(user["id"]) + len(files) > settings.max_docs_per_user:
         raise HTTPException(400, f"Document limit reached ({settings.max_docs_per_user} per user).")
     # uploads land in whatever folder is open, so validate before writing any of them
@@ -153,29 +258,29 @@ async def upload_documents(
     if target and not db.get_folder(target, user["id"]):
         raise HTTPException(404, "Folder not found")
     results = []
-    import numpy as np
+    initial_status = "ready" if settings.ingest_sync else "processing"
 
     for f in files:
         raw = await f.read()
+        name = f.filename or "unnamed"
         if len(raw) > settings.max_upload_mb * 1024 * 1024:
-            results.append({"filename": f.filename, "ok": False, "error": f"File too large (max {settings.max_upload_mb} MB)"})
+            results.append({"filename": name, "ok": False, "error": f"File too large (max {settings.max_upload_mb} MB)"})
             continue
-        doc_id = db.create_document(user["id"], f.filename or "unnamed", target)
+        doc_id = db.create_document(user["id"], name, target, status=initial_status)
         try:
-            text = ingest.extract_text(f.filename or "", raw)
-            chunks = ingest.chunk_text(text)
-            if not chunks:
-                raise ingest.ParseError("No readable text found in this file.")
-            from . import providers
-
-            vectors = providers.embed_texts(chunks)
-            for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
-                db.insert_chunk(doc_id, user["id"], idx, chunk, vec.astype(np.float32))
-            db.finish_document(doc_id, len(chunks))
-            results.append({"filename": f.filename, "ok": True, "chunks": len(chunks), "id": doc_id})
+            chunks = await run_in_threadpool(_prepare, name, raw)
         except ingest.ParseError as exc:
             db.finish_document(doc_id, 0, str(exc))
-            results.append({"filename": f.filename, "ok": False, "error": str(exc)})
+            results.append({"filename": name, "ok": False, "error": str(exc)})
+            continue
+        ingest_jobs.submit(doc_id, user["id"], chunks)
+        results.append({
+            "filename": name,
+            "ok": True,
+            "chunks": len(chunks),
+            "id": doc_id,
+            "status": initial_status,
+        })
     return {"results": results}
 
 
@@ -183,6 +288,7 @@ async def upload_documents(
 def delete_document(doc_id: str, user: dict = Depends(auth.current_user)):
     if not db.delete_document(doc_id, user["id"]):
         raise HTTPException(404, "Document not found")
+    audit.record(user, "document.delete", target_id=doc_id)
     return {"ok": True}
 
 
@@ -205,7 +311,9 @@ def delete_documents(body: BulkDeleteIn, user: dict = Depends(auth.current_user)
     # than a screenful anyway, so a hard ceiling keeps a crafted body harmless.
     if len(ids) > 500:
         raise HTTPException(400, "Too many documents in one request (max 500)")
-    return {"deleted": db.delete_documents(ids, user["id"]), "requested": len(ids)}
+    deleted = db.delete_documents(ids, user["id"])
+    audit.record(user, "document.delete", detail=f"{deleted} documents")
+    return {"deleted": deleted, "requested": len(ids)}
 
 
 class MoveIn(BaseModel):
@@ -330,11 +438,13 @@ def chat(body: ChatIn, user: dict = Depends(auth.current_user)):
     ][-20:]
 
     db.add_message(cid, "user", question)
+    started = time.time()
+    meter = usage.Usage()
 
     def stream():
         parts, sources = [], []
         try:
-            for event, payload in rag.answer_stream(user["id"], question, history):
+            for event, payload in rag.answer_stream(user["id"], question, history, usage=meter):
                 if event == "delta":
                     parts.append(payload)
                     yield f"data: {json.dumps({'delta': payload})}\n\n"
@@ -345,6 +455,8 @@ def chat(body: ChatIn, user: dict = Depends(auth.current_user)):
             db.add_message(cid, "assistant", full, sources=sources or None)
             if db.get_conversation(cid, user["id"])["title"] == "New conversation":
                 db.touch_conversation(cid, question[:60])
+            usage.record(user["id"], meter, source="web",
+                         latency_ms=int((time.time() - started) * 1000))
         yield f"data: {json.dumps({'done': True, 'conversation_id': cid, 'sources': sources})}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
@@ -372,6 +484,7 @@ def _decoded_key(key: dict) -> dict:
 @app.post("/api/api-keys")
 def create_key(body: ApiKeyIn, user: dict = Depends(auth.current_user)):
     record, full = db.create_api_key(user["id"], body.label)
+    audit.record(user, "key.create", target_id=record["id"], detail=body.label)
     return {"key": full, "id": record["id"], "prefix": record["prefix"]}
 
 
@@ -403,6 +516,7 @@ def patch_key(key_id: str, body: ApiKeyPatchIn, user: dict = Depends(auth.curren
         raise HTTPException(400, "Nothing to update")
 
     db.update_api_key(key_id, user["id"], fields)
+    audit.record(user, "key.update", target_id=key_id)
     return {"ok": True, "key": _decoded_key(db.get_api_key(key_id, user["id"]))}
 
 
@@ -423,6 +537,7 @@ def key_usage(key_id: str, user: dict = Depends(auth.current_user)):
 def revoke_key(key_id: str, user: dict = Depends(auth.current_user)):
     if not db.revoke_api_key(key_id, user["id"]):
         raise HTTPException(404, "API key not found")
+    audit.record(user, "key.revoke", target_id=key_id)
     return {"ok": True}
 
 
@@ -478,7 +593,7 @@ def _widget_turn(record: dict, body: WidgetChatIn) -> tuple[str, str, list[dict]
     if body.conversation_id and db.get_conversation(body.conversation_id, user_id):
         cid = body.conversation_id
     else:
-        cid = db.create_conversation(user_id, "[widget] " + question[:50])
+        cid = db.create_conversation(user_id, "[widget] " + question[:50], api_key_id=record["id"])
     history = [
         {"role": m["role"], "content": m["content"]}
         for m in db.get_messages(cid)
@@ -511,16 +626,24 @@ def widget_chat(body: WidgetChatIn, record: dict = Depends(_widget_key)):
 
     cid, question, history = _widget_turn(record, body)
     scope = {"doc_ids": content["docIds"], "fallback": behavior["fallbackMessage"]}
+    started = time.time()
+    meter = usage.Usage()
+
+    def meter_now() -> None:
+        usage.record(record["user_id"], meter, source="widget", api_key_id=record["id"],
+                     latency_ms=int((time.time() - started) * 1000))
 
     if not body.stream:
-        text, sources = rag.answer_once(record["user_id"], question, history, **scope)
+        text, sources = rag.answer_once(record["user_id"], question, history, usage=meter, **scope)
         db.add_message(cid, "assistant", text, sources)
+        meter_now()
         return {"conversation_id": cid, "answer": text, "sources": sources}
 
     def stream():
         parts, sources = [], []
         try:
-            for event, payload in rag.answer_stream(record["user_id"], question, history, **scope):
+            for event, payload in rag.answer_stream(record["user_id"], question, history,
+                                                    usage=meter, **scope):
                 if event == "delta":
                     parts.append(payload)
                     yield f"data: {json.dumps({'delta': payload})}\n\n"
@@ -529,6 +652,7 @@ def widget_chat(body: WidgetChatIn, record: dict = Depends(_widget_key)):
         finally:
             full = "".join(parts).strip()
             db.add_message(cid, "assistant", full, sources=sources or None)
+            meter_now()
         yield f"data: {json.dumps({'done': True, 'conversation_id': cid, 'sources': sources})}\n\n"
 
     return StreamingResponse(
@@ -564,6 +688,7 @@ def widget_page(key: str = ""):
     # the widget is versioned with the JS it loads: a stale cached copy would
     # keep calling removed endpoints after an upgrade
     response.headers["Cache-Control"] = "no-cache"
+    response.headers["Referrer-Policy"] = "no-referrer"  # the key rides in the query string
     record = db.get_api_key_record(key) if key else None
     if record:
         allowed = widget_config.parse_origins(record["allowed_origins"])
@@ -586,6 +711,53 @@ def sdk_script():
         settings.base_dir + "/static/sdk.js",
         media_type="application/javascript",
         headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+# ---------------------------------------------------------------- ops: audit & export
+
+@app.get("/api/audit")
+def audit_log(days: int = 30, limit: int = 200, action: str = "",
+              _: dict = Depends(auth.current_user)):
+    """Instance activity trail for the operator (admin only)."""
+    days = max(1, min(days, 365))
+    return {
+        "days": days,
+        "events": db.list_audit_events(
+            since=time.time() - days * 86400, limit=limit, action=action
+        ),
+    }
+
+
+@app.get("/api/export")
+def export_data(user: dict = Depends(auth.current_user)):
+    """Everything this account owns, as one JSON download.
+
+    For backup, migration between on-premise installs and handover to the
+    customer. Key hashes and password hashes are deliberately absent.
+    """
+    uid = user["id"]
+    payload = {
+        "format": "ragbase-export/1",
+        "exported_at": time.time(),
+        "account": {"email": user["email"], "is_admin": bool(user["is_admin"])},
+        "documents": [
+            {**doc, "text": db.chunks_text(doc["id"])}
+            for doc in db.list_documents(uid)
+        ],
+        "conversations": [
+            {**conv, "messages": db.get_messages(conv["id"])}
+            for conv in db.list_conversations(uid)
+        ],
+        "api_keys": db.list_api_keys(uid),
+        "usage_totals": db.usage_totals(uid),
+    }
+    audit.record(user, "data.export")
+    filename = f"ragbase-export-{user['email'].split('@')[0]}-{time.strftime('%Y%m%d')}.json"
+    return Response(
+        json.dumps(payload, ensure_ascii=False),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -621,6 +793,7 @@ def admin_set_plan(key_id: str, body: PlanIn, _: dict = Depends(auth.require_adm
 
 @app.post("/api/admin/users/{uid}/reset-password")
 def admin_reset_password(uid: str, body: ResetPasswordIn, _: dict = Depends(auth.require_admin)):
+    """The operator's recovery path when someone is locked out (no mail server)."""
     if not db.update_password(uid, auth.hash_password(body.new_password)):
         raise HTTPException(404, "User not found")
     return {"ok": True}

@@ -13,7 +13,7 @@ No vector database. No build step. One process, one SQLite file.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![Tests](https://img.shields.io/badge/tests-326%20passing-brightgreen)](#tests)
+[![Tests](https://img.shields.io/badge/tests-463%20passing-brightgreen)](#tests)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ![RAGbase chat with citations](docs/1_chat_with_citations.png)
@@ -286,6 +286,72 @@ curl -X PATCH https://your-host/api/admin/api-keys/KEY_ID/plan \
 
 ![Embed in your website](docs/hero_2_integration.png)
 
+## Usage meter
+
+Every answered question writes one row to `usage_events`: prompt and completion
+tokens, which API key spent them, whether the answer fell back to a canned
+message, and how long it took. Exact counts when the provider reports `usage`
+(the OpenAI SDK does, including on streams via `stream_options`); a character
+estimate otherwise, so demo mode and terse providers are still metered.
+
+```http
+GET /api/usage?days=30            Authorization: Bearer $TOKEN
+```
+
+```json
+{
+  "totals": {"requests": 2, "prompt_tokens": 16977, "completion_tokens": 358,
+             "total_tokens": 17335, "errors": 0, "cost": 0.0},
+  "daily":  [{"day": "2026-11-04", "requests": 2, "prompt_tokens": 16977, …}],
+  "by_key": [{"api_key_id": null, "source": "web", "requests": 1, …},
+             {"api_key_id": "c1d7…", "key_prefix": "rbk_ccc56b…",
+              "key_label": "官网小组件", "requests": 1, "prompt_tokens": 13222, …}],
+  "pricing": {"per_mtok_in": 0.0, "per_mtok_out": 0.0, "currency": "USD"}
+}
+```
+
+`cost` is derived live from `RAGBASE_PRICE_PER_MTOK_IN/OUT`, so raising a price
+re-prices history instead of rewriting it. Revoking a key keeps its usage: the
+row survives as `revoked: true`, because an invoice has to outlive the key.
+
+## Background ingestion
+
+An upload is parsed inside the request — an unreadable PDF has to fail while
+somebody is watching — then embedded by a small thread pool
+(`RAGBASE_INGEST_WORKERS`). The response says `"status": "processing"` and the
+library polls until the tile turns `ready`:
+
+```json
+{"results": [{"filename": "contract.pdf", "ok": true, "chunks": 214,
+              "id": "…", "status": "processing"}]}
+```
+
+This is what stops one large upload from freezing the process: the embedding
+call is blocking, so doing it in the request used to hold the event loop — and
+therefore every other user's chat — until the provider finished. Chunks are
+written in batches of `RAGBASE_INGEST_BATCH`, one transaction each, and a
+document deleted while its job runs is left alone. Documents left in
+`processing` by a crash are marked failed on the next start.
+
+## On-premise deployment
+
+RAGbase is delivered as a self-hosted installation: one SQLite file inside the
+customer's network, one knowledge base per account, no external services and no
+hosted billing.
+
+- **Accounts** — the operator creates accounts; the first one becomes admin.
+  `RAGBASE_ALLOW_REGISTRATION=false` closes sign-up afterwards. There are no
+  invitations, roles or email verification; an admin resets passwords with
+  `POST /api/admin/users/{id}/reset-password`.
+- **Security** — bcrypt passwords, JWTs with a version counter (a password
+  change or "sign out everywhere" revokes every older session), per-(email, IP)
+  login throttling and per-key request quotas.
+- **Operations** — `GET /api/audit` (instance activity), `GET /api/export`
+  (full account JSON backup), `GET /api/usage` (token counts for capacity
+  planning) and `DELETE /api/account`.
+- **Delivery** — white-label widget branding, per-key origin allow-lists,
+  Docker with a health check, and one `data/` directory to back up.
+
 ## Configuration
 
 All settings live in `.env` (see [.env.example](.env.example)):
@@ -298,6 +364,7 @@ All settings live in `.env` (see [.env.example](.env.example)):
 | `RAGBASE_EMBEDDING_API_KEY` | — | Embeddings. Leave empty for local feature-hash vectors + BM25. |
 | `RAGBASE_JWT_SECRET` | — | **Change in production** |
 | `RAGBASE_ALLOW_REGISTRATION` | `true` | Set `false` to make the instance invite-only |
+| `RAGBASE_LOGIN_MAX_ATTEMPTS` / `_WINDOW_SECONDS` | `5` / `900` | Failed logins per (email, IP) before lockout |
 | `RAGBASE_MAX_DOCS_PER_USER` | `0` (unlimited) | Per-user document cap |
 | `RAGBASE_MAX_UPLOAD_MB` | `25` | Upload size limit per file |
 | `RAGBASE_CHUNK_SIZE` / `RAGBASE_CHUNK_OVERLAP` | `900` / `150` | Chunking parameters |
@@ -305,6 +372,10 @@ All settings live in `.env` (see [.env.example](.env.example)):
 | `RAGBASE_LIST_TOP_K` | `20` | Passages for a corpus-wide question; `0` disables widening and the inventory |
 | `RAGBASE_INVENTORY_DOCS` | `200` | Documents listed in the prompt's corpus inventory |
 | `RAGBASE_CONTEXT_CHARS` | `24000` | Retrieved characters per answer, inventory included |
+| `RAGBASE_PRICE_PER_MTOK_IN` / `_OUT` | `0` | Price per million tokens for the `cost` field on `/api/usage`; `0` = report tokens only |
+| `RAGBASE_INGEST_WORKERS` | `2` | Documents embedded concurrently in the background pool |
+| `RAGBASE_INGEST_BATCH` | `64` | Chunks per embedding call / write transaction |
+| `RAGBASE_INGEST_SYNC` | `0` | `1` embeds inline before responding (debugging only) |
 | `RAGBASE_DATA_DIR` | `data` | SQLite database location |
 
 ## Docker — one command
@@ -393,8 +464,8 @@ No LLM key, no network, and your `data/` folder is never touched.
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                        # 326 tests, ~45s
-pytest --cov=app --cov-report=term-missing    # 99% coverage of app/
+pytest                                        # 463 tests, ~80s
+pytest --cov=app --cov-report=term-missing    # 97% coverage of app/
 ```
 
 | Area | File |
@@ -407,6 +478,10 @@ pytest --cov=app --cov-report=term-missing    # 99% coverage of app/
 | BM25 scoring, index caching, per-user isolation, Chinese queries | `tests/test_bm25.py` |
 | Retrieval, RRF fusion, prompt assembly, answers | `tests/test_rag.py` |
 | HTTP: auth, documents, SSE chat, conversations, API keys & widget, admin, static/CORS | `tests/test_api_*.py` |
+| Usage meter: estimation, per-key billing, windows, cost, revoked keys | `tests/test_usage.py` |
+| Account security: password change, throttling, token revocation | `tests/test_auth_flow.py` |
+| Operations: audit log, export, account deletion | `tests/test_compliance.py` |
+| Background ingestion: queue, batching, failures, restart recovery | `tests/test_ingest_async.py` |
 | Ops CLI (`python -m app.tools`) | `tests/test_tools_cli.py` |
 
 ## Architecture
@@ -423,6 +498,10 @@ ragbase/
 │   ├── bm25.py             # per-user lexical index, cached in memory
 │   ├── providers.py        # OpenAI / demo providers, zh/en tokenizer, vector migration
 │   ├── rag.py              # retrieval, RRF fusion, prompt building, cited answering
+│   ├── ingest_jobs.py      # background embedding pool for uploads
+│   ├── ratelimit.py        # sliding-window limiter for credential endpoints
+│   ├── audit.py            # append-only activity trail
+│   ├── usage.py            # token meter: estimation, cost, per-key aggregates
 │   └── tools.py            # ops CLI
 └── app/static/             # frontend (vanilla JS, no build): i18n.js, app.js, styles.css
 ```
