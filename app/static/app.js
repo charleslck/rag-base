@@ -53,7 +53,13 @@ async function api(path, options = {}) {
     throw new Error(t("err.sessionExpired"));
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || t("err.request", { status: res.status }));
+  if (!res.ok) {
+    // A 405 means the path exists only under another verb — in practice the
+    // backend predates this page (static files reload from disk, routes do not).
+    // "Method Not Allowed" tells the user nothing; name the likely cause instead.
+    throw new Error(res.status === 405 ? t("err.method")
+      : data.detail || t("err.request", { status: res.status }));
+  }
   return data;
 }
 

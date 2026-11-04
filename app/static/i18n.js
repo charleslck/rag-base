@@ -162,6 +162,7 @@ const I18N = {
     /* ---- errors ---- */
     "err.sessionExpired": "Session expired — please sign in again.",
     "err.request": "Request failed ({status})",
+    "err.method": "This action is not supported by the running server. If you just updated the backend, restart it and try again.",
     "err.chat": "Chat failed ({status})",
     "err.keyCreate": "Failed to create key: {msg}",
     "err.keySave": "Failed to save: {msg}",
@@ -385,6 +386,7 @@ const I18N = {
     /* ---- errors ---- */
     "err.sessionExpired": "登录状态已过期，请重新登录。",
     "err.request": "请求失败（{status}）",
+    "err.method": "当前服务端不支持这个操作。如果刚更新过后端，重启服务后重试。",
     "err.chat": "对话请求失败（{status}）",
     "err.keyCreate": "创建密钥失败：{msg}",
     "err.keySave": "保存失败：{msg}",
