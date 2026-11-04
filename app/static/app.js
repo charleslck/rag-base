@@ -22,12 +22,17 @@ const state = {
   intTab: "embed", // embed | api | keys — which rail tab is showing
   pane: "chats", // chats | kb — which tab the sidebar rail has selected
   libDocs: [], // every document as the server returned it
+  libFolders: [], // flat folder list; parent_id builds the tree
+  libFolder: null, // folder currently open, null = root
   libShown: [], // the subset the grid is showing, after search and sort
   libSel: new Set(), // ids ticked in the file library
   libAnchor: null, // index of the last clicked tile, for shift-ranges
   libQuery: "",
   libSort: "new",
   libView: localStorage.getItem("ragbase_lib_view") === "list" ? "list" : "grid",
+  dragging: null, // ids being dragged onto a folder
+  folderEdit: null, // folder being renamed, null = creating a new one
+  moving: null, // target folder picked in the move dialog
   uploading: false,
   uploadTimer: null,
 };
@@ -155,7 +160,7 @@ async function boot() {
     state.bannerModel = me.model;
     renderBanner();
     showApp();
-    await Promise.all([loadConversations(), loadDocuments()]);
+    await Promise.all([loadConversations(), loadLibrary()]);
     showWelcome();
   } catch (ex) {
     showAuth();
@@ -187,7 +192,7 @@ function switchTab(which) {
   closeIntegrate();
   if (library) {
     renderLibrary(); // paints immediately, in case the fetch below is slow
-    loadDocuments().catch(() => {}); // the API or the widget may have added files
+    loadLibrary().catch(() => {}); // the API or the widget may have added files
     closeSidebarMobile();
   }
 }
@@ -898,6 +903,14 @@ function closeSidebarMobile() {
  */
 const FILE_GLYPH =
   '<svg width="26" height="26" viewBox="0 0 24 24" fill="none"><path d="M6 2.5h7.5L19 8v13.5H6z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M13.5 2.5V8H19" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+const FOLDER_GLYPH =
+  '<svg width="26" height="26" viewBox="0 0 24 24" fill="none"><path d="M2.5 6.4A1.9 1.9 0 014.4 4.5h4.3l2.1 2.4h8.8a1.9 1.9 0 011.9 1.9v9.3a1.9 1.9 0 01-1.9 1.9H4.4a1.9 1.9 0 01-1.9-1.9z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+const WHERE_GLYPH =
+  '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M1.8 4.4A1.3 1.3 0 013.1 3.1h3l1.4 1.6h5.4a1.3 1.3 0 011.3 1.3v6.2a1.3 1.3 0 01-1.3 1.3H3.1a1.3 1.3 0 01-1.3-1.3z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>';
+const PEN_GLYPH =
+  '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M11.2 2.3l2.5 2.5-8 8-3.2.7.7-3.2z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+const TRASH_GLYPH =
+  '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.2h5.8l.6-8.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 const EXT_LABEL = {
   pdf: "PDF", docx: "DOC", doc: "DOC", txt: "TXT",
@@ -911,11 +924,48 @@ function extOf(name) {
   return m ? m[1].toLowerCase() : "txt";
 }
 
+/* ---------------- folders ----------------
+ * A per-user tree held as a flat list with parent_id. Everything the UI needs
+ * (breadcrumbs, a folder's children, the label of a search hit) is derived
+ * from that list, so there is exactly one copy of the truth.
+ */
+function folderById(id) {
+  return state.libFolders.find((f) => f.id === id) || null;
+}
+
+function folderChain(id) {
+  const chain = [];
+  let f = folderById(id);
+  // the guard is for data that was already broken (a stray cycle), not logic
+  for (let i = 0; f && i < 64; i++) {
+    chain.unshift(f);
+    f = f.parent_id ? folderById(f.parent_id) : null;
+  }
+  return chain;
+}
+
+function folderLabel(id) {
+  return folderChain(id).map((f) => f.name).join(" / ");
+}
+
+function childFolders() {
+  const here = state.libFolder || null;
+  const collator = currentLang() === "zh" ? "zh-CN" : "en";
+  return state.libFolders
+    .filter((f) => (f.parent_id || null) === here)
+    .sort((a, b) => a.name.localeCompare(b.name, collator, { numeric: true }));
+}
+
 /* The server returns documents newest first. Filtering and sorting happen here:
    a few hundred rows sort in memory faster than they round-trip. */
 function libVisible() {
   const q = state.libQuery.trim().toLowerCase();
-  const docs = state.libDocs.filter((d) => !q || d.filename.toLowerCase().includes(q));
+  const here = state.libFolder || null;
+  // a query searches the whole library — that is what the box is for; without
+  // one the grid shows exactly one folder's own files
+  const docs = q
+    ? state.libDocs.filter((d) => d.filename.toLowerCase().includes(q))
+    : state.libDocs.filter((d) => (d.folder_id || null) === here);
   const collator = currentLang() === "zh" ? "zh-CN" : "en";
   const byName = (a, b) =>
     a.filename.localeCompare(b.filename, collator, { numeric: true, sensitivity: "base" });
@@ -929,6 +979,29 @@ function libVisible() {
   return docs.sort(order[state.libSort] || order.new);
 }
 
+function folderTileHTML(folder) {
+  const kids = state.libFolders.filter((x) => x.parent_id === folder.id).length;
+  const parts = [t(folder.docs === 1 ? "lib.oneFile" : "lib.nFiles", { n: folder.docs || 0 })];
+  if (kids) parts.push(t(kids === 1 ? "lib.oneFolder" : "lib.nFolders", { n: kids }));
+  return (
+    '<div class="tile tile--folder" data-folder="' + esc(folder.id) + '" role="button" tabindex="0"' +
+      ' aria-label="' + esc(t("lib.openFolder", { name: folder.name })) + '">' +
+      '<span class="tile-top"><span class="tile-glyph tile-glyph--folder" aria-hidden="true">' +
+        FOLDER_GLYPH + "</span></span>" +
+      '<span class="tile-name" title="' + esc(folder.name) + '">' + esc(folder.name) + "</span>" +
+      '<span class="tile-meta">' + esc(parts.join(" · ")) + "</span>" +
+      '<span class="tile-acts">' +
+        '<button class="tile-act" type="button" data-folder-rename="' + esc(folder.id) + '"' +
+          ' data-i18n-title="lib.folderRename" aria-label="' + esc(t("lib.folderRename")) + '">' +
+          PEN_GLYPH + "</button>" +
+        '<button class="tile-act tile-act--danger" type="button" data-folder-del="' + esc(folder.id) + '"' +
+          ' data-i18n-title="lib.folderDelete" aria-label="' + esc(t("lib.folderDelete")) + '">' +
+          TRASH_GLYPH + "</button>" +
+      "</span>" +
+    "</div>"
+  );
+}
+
 function tileHTML(doc, idx) {
   const ext = extOf(doc.filename);
   const on = state.libSel.has(doc.id);
@@ -936,9 +1009,15 @@ function tileHTML(doc, idx) {
     ? esc(t(doc.num_chunks === 1 ? "kb.chunkOne" : "kb.chunks", { n: doc.num_chunks })) +
       " · " + esc(fmtTime(doc.created_at))
     : '<span class="tile-err">' + esc(doc.error || t("err.failed")) + "</span>";
+  // a search crosses folders, so say which one a hit came from. It gets its own
+  // line: appended to the meta line it would always be the part that gets cut.
+  const where = state.libQuery.trim() && doc.folder_id && folderById(doc.folder_id)
+    ? '<span class="tile-where" title="' + esc(folderLabel(doc.folder_id)) + '">' +
+      WHERE_GLYPH + "<span>" + esc(folderLabel(doc.folder_id)) + "</span></span>"
+    : "";
   return (
-    '<label class="tile' + (on ? " is-sel" : "") + '" data-id="' + esc(doc.id) +
-      '" data-idx="' + idx + '">' +
+    '<label class="tile tile--doc' + (on ? " is-sel" : "") + '" data-id="' + esc(doc.id) +
+      '" data-idx="' + idx + '" draggable="true">' +
       // a real checkbox keeps the tile keyboard-operable and screen-reader legible
       '<input type="checkbox" class="tile-input" data-id="' + esc(doc.id) + '"' +
         (on ? " checked" : "") + ' aria-label="' + esc(t("lib.pick", { name: doc.filename })) + '">' +
@@ -946,14 +1025,18 @@ function tileHTML(doc, idx) {
       '<span class="tile-top"><span class="tile-glyph" aria-hidden="true">' + FILE_GLYPH + "</span>" +
         '<span class="tile-ext">' + esc(EXT_LABEL[ext] || ext.slice(0, 4).toUpperCase()) + "</span></span>" +
       '<span class="tile-name" title="' + esc(doc.filename) + '">' + esc(doc.filename) + "</span>" +
-      '<span class="tile-meta">' + meta + "</span>" +
+      '<span class="tile-meta">' + meta + "</span>" + where +
     "</label>"
   );
 }
 
-async function loadDocuments() {
-  const data = await api("/api/documents");
-  state.libDocs = data.documents || [];
+async function loadLibrary() {
+  // one round trip each, in parallel: the grid needs both to paint at all
+  const [docs, folders] = await Promise.all([api("/api/documents"), api("/api/folders")]);
+  state.libDocs = docs.documents || [];
+  state.libFolders = folders.folders || [];
+  // the open folder may have been deleted from another tab
+  if (state.libFolder && !folderById(state.libFolder)) state.libFolder = null;
   renderDocCount();
   renderLibrary();
 }
@@ -967,6 +1050,23 @@ function renderDocCount() {
   counter.textContent = t(total === 1 ? "kb.countOne" : "kb.count", { n: total, c: chunks });
 }
 
+function renderCrumbs(searching) {
+  const nav = $("#lib-crumbs");
+  nav.classList.toggle("hidden", searching); // a search spans folders; the trail would lie
+  if (searching) return;
+  const chain = state.libFolder ? folderChain(state.libFolder) : [];
+  const parts = [{ id: "", name: t("lib.root") }].concat(chain);
+  $("#lib-crumb-list").innerHTML = parts
+    .map((f, i) => {
+      const last = i === parts.length - 1;
+      return (i ? '<li class="lib-crumb-sep" aria-hidden="true">/</li>' : "") +
+        '<li><button type="button" class="lib-crumb' + (last ? " is-here" : "") +
+        '" data-crumb="' + esc(f.id) + '"' + (last ? ' aria-current="page"' : "") + ">" +
+        esc(f.name) + "</button></li>";
+    })
+    .join("");
+}
+
 function renderLibrary() {
   const docs = libVisible();
   state.libShown = docs;
@@ -977,27 +1077,38 @@ function renderLibrary() {
   for (const id of [...state.libSel]) if (!alive.has(id)) state.libSel.delete(id);
   if (state.libAnchor !== null && state.libAnchor >= docs.length) state.libAnchor = null;
 
+  const searching = !!state.libQuery.trim();
+  const folders = searching ? [] : childFolders();
+
   const grid = $("#lib-grid");
   grid.className = "lib-grid" + (state.libView === "list" ? " is-list" : "");
-  grid.innerHTML = docs.map(tileHTML).join("");
+  grid.innerHTML = folders.map(folderTileHTML).join("") + docs.map(tileHTML).join("");
+
+  renderCrumbs(searching);
 
   const empty = $("#lib-empty");
-  empty.classList.toggle("hidden", docs.length > 0);
-  if (!docs.length) {
-    // an empty library has no matches to miss — "nothing here yet" is the honest
-    // message even when a stale query is still sitting in the box
-    const q = state.libQuery.trim();
-    empty.innerHTML = q && state.libDocs.length
-      ? "<strong>" + esc(t("lib.noMatchTitle", { q })) + "</strong>" + esc(t("lib.noMatchHint"))
-      : "<strong>" + esc(t("lib.emptyTitle")) + "</strong>" + esc(t("lib.emptyHint"));
+  const nothing = !docs.length && !folders.length;
+  empty.classList.toggle("hidden", !nothing);
+  if (nothing) {
+    // three different nothings: no match, an empty folder, an empty library
+    empty.innerHTML = searching
+      ? "<strong>" + esc(t("lib.noMatchTitle", { q: state.libQuery.trim() })) + "</strong>" +
+        esc(t("lib.noMatchHint"))
+      : state.libFolder
+        ? "<strong>" + esc(t("lib.emptyFolderTitle")) + "</strong>" + esc(t("lib.emptyFolderHint"))
+        : "<strong>" + esc(t("lib.emptyTitle")) + "</strong>" + esc(t("lib.emptyHint"));
   }
 
   const total = state.libDocs.length;
-  if (!total) $("#lib-stat").textContent = "";
-  else if (state.libQuery.trim()) $("#lib-stat").textContent = t("lib.found", { n: docs.length, total });
+  const stat = $("#lib-stat");
+  if (!total) stat.textContent = "";
+  else if (searching) stat.textContent = t("lib.found", { n: docs.length, total });
+  else if (state.libFolder) {
+    stat.textContent = t(docs.length === 1 ? "lib.inFolderOne" : "lib.inFolder", { n: docs.length });
+  }
   else {
     const chunks = state.libDocs.reduce((n, d) => n + (d.num_chunks || 0), 0);
-    $("#lib-stat").textContent = t(total === 1 ? "kb.countOne" : "kb.count", { n: total, c: chunks });
+    stat.textContent = t(total === 1 ? "kb.countOne" : "kb.count", { n: total, c: chunks });
   }
 
   syncSelection();
@@ -1007,6 +1118,8 @@ function syncSelection() {
   const n = state.libSel.size;
   $("#lib-sel").classList.toggle("hidden", n === 0);
   $("#lib-tools").classList.toggle("hidden", n > 0);
+  // nowhere to move them to: no folders exist yet
+  $("#lib-move").disabled = state.libFolders.length === 0;
   $("#lib-sel-n").textContent = n ? t("lib.selected", { n }) : "";
   if (!n) state.libAnchor = null;
 
@@ -1017,7 +1130,7 @@ function syncSelection() {
   all.checked = shown.length > 0 && picked === shown.length;
   all.indeterminate = picked > 0 && picked < shown.length;
 
-  $("#lib-grid").querySelectorAll(".tile").forEach((tile) => {
+  $("#lib-grid").querySelectorAll(".tile--doc").forEach((tile) => {
     const on = state.libSel.has(tile.dataset.id);
     tile.classList.toggle("is-sel", on);
     const box = tile.querySelector(".tile-input");
@@ -1035,6 +1148,180 @@ function setLibView(view, opts) {
   });
   if (!opts || opts.render !== false) renderLibrary();
 }
+
+/* ---------------- folder navigation ---------------- */
+function openFolder(id) {
+  state.libFolder = id || null;
+  state.libSel.clear();
+  // a folder is a place, not a filter: carrying the query in would show other
+  // folders' hits under a breadcrumb that says you are somewhere else
+  state.libQuery = "";
+  $("#lib-q").value = "";
+  $("#lib-q-clear").classList.add("hidden");
+  renderLibrary();
+}
+
+function openFolderDialog(folder) {
+  state.folderEdit = folder ? folder.id : null;
+  $("#folder-title").textContent = folder ? t("lib.folderRename") : t("lib.folderNew");
+  $("#folder-save").textContent = folder ? t("lib.save") : t("lib.create");
+  const input = $("#folder-name");
+  input.value = folder ? folder.name : "";
+  // say where it will land, or the trail has to be read behind the dialog
+  const hint = $("#folder-hint");
+  hint.hidden = !!folder;
+  hint.textContent = folder ? "" : t("lib.folderWhere", {
+    path: state.libFolder ? folderLabel(state.libFolder) : t("lib.root"),
+  });
+  $("#folder-modal").classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  input.focus();
+  input.select();
+}
+
+function closeFolderDialog() {
+  $("#folder-modal").classList.add("hidden");
+  document.body.classList.remove("modal-open");
+  state.folderEdit = null;
+}
+
+async function saveFolder() {
+  const input = $("#folder-name");
+  const name = input.value.trim();
+  if (!name) { input.focus(); return; }
+  try {
+    if (state.folderEdit) {
+      await api("/api/folders/" + encodeURIComponent(state.folderEdit), {
+        method: "PATCH", body: { name },
+      });
+    } else {
+      await api("/api/folders", {
+        method: "POST", body: { name, parent_id: state.libFolder || null },
+      });
+    }
+    closeFolderDialog();
+    await loadLibrary();
+  } catch (ex) {
+    alert(ex.message);
+  }
+}
+
+async function removeFolder(id) {
+  const folder = folderById(id);
+  if (!folder) return;
+  // direct files, not the whole subtree: the confirmation should quote what
+  // the user can actually see when they click the bin
+  const docs = state.libDocs.filter((d) => d.folder_id === id).length;
+  const subs = state.libFolders.filter((f) => f.parent_id === id).length;
+  const ok = await confirmDialog(
+    t("lib.folderDelTitle", { name: folder.name }),
+    subs
+      ? t("lib.folderDelSub", { n: docs, sub: subs })
+      : t("lib.folderDelPlain", { n: docs }),
+    t("lib.delete"),
+  );
+  if (!ok) return;
+  try {
+    await api("/api/folders/" + encodeURIComponent(id), { method: "DELETE" });
+    // loadLibrary drops the open folder if it was inside the deleted subtree
+    await loadLibrary();
+  } catch (ex) {
+    alert(ex.message);
+  }
+}
+
+/* ---------------- move dialog ---------------- */
+function openMoveDialog() {
+  if (!state.libSel.size) return;
+  const collator = currentLang() === "zh" ? "zh-CN" : "en";
+  // a flat list of paths: indentation carries the tree, and every row is a
+  // single click at any depth — faster than opening folders one by one
+  const rows = [{ id: "", label: t("lib.root"), depth: 0 }];
+  const walk = (parent, depth) => {
+    state.libFolders
+      .filter((f) => (f.parent_id || null) === parent)
+      .sort((a, b) => a.name.localeCompare(b.name, collator, { numeric: true }))
+      .forEach((f) => {
+        rows.push({ id: f.id, label: f.name, depth });
+        walk(f.id, depth + 1);
+      });
+  };
+  walk(null, 1);
+  const here = state.libFolder || "";
+  const pickable = rows.filter((r) => r.id !== here);
+  // pre-select the parent, so the default action is "take it up one level"
+  // instead of a silently pointless "move into the folder it is already in"
+  const preferred = state.libFolder ? (folderById(state.libFolder)?.parent_id || "") : "";
+  $("#move-list").innerHTML = rows
+    .map((r) => '<label class="move-row' + (r.id === here ? " is-here" : "") +
+      '" style="--d:' + r.depth + '">' +
+      '<input type="radio" name="move-dest" value="' + esc(r.id) + '"' +
+      (r.id === here ? " disabled" : "") +
+      (r.id === (preferred || pickable[0]?.id || "") && r.id !== here ? " checked" : "") +
+      "><span>" + esc(r.label) + "</span></label>")
+    .join("");
+  $("#move-modal").classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  const picked = $("#move-list input:checked") || $("#move-list input:not(:disabled)");
+  if (picked) picked.focus();
+}
+
+function closeMoveDialog() {
+  $("#move-modal").classList.add("hidden");
+  document.body.classList.remove("modal-open");
+}
+
+async function moveSelected() {
+  const picked = document.querySelector('input[name="move-dest"]:checked');
+  if (!picked) return;
+  const ids = [...state.libSel];
+  try {
+    await api("/api/documents/move", {
+      method: "POST", body: { ids, folder_id: picked.value || null },
+    });
+    closeMoveDialog();
+    state.libSel.clear();
+    await loadLibrary();
+  } catch (ex) {
+    alert(ex.message);
+  }
+}
+
+async function moveInto(ids, folderId) {
+  if (!ids || !ids.length) return;
+  if ((folderId || null) === (state.libFolder || null)) return; // already there
+  try {
+    await api("/api/documents/move", {
+      method: "POST", body: { ids, folder_id: folderId || null },
+    });
+    state.libSel.clear();
+    await loadLibrary();
+  } catch (ex) {
+    alert(ex.message);
+  }
+}
+
+$("#lib-new-folder").addEventListener("click", () => openFolderDialog(null));
+$("#folder-cancel").addEventListener("click", closeFolderDialog);
+$("#folder-save").addEventListener("click", saveFolder);
+$("#folder-name").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); saveFolder(); }
+});
+$("#folder-modal").addEventListener("click", (e) => {
+  if (e.target === $("#folder-modal")) closeFolderDialog();
+});
+
+$("#lib-move").addEventListener("click", openMoveDialog);
+$("#move-cancel").addEventListener("click", closeMoveDialog);
+$("#move-ok").addEventListener("click", moveSelected);
+$("#move-modal").addEventListener("click", (e) => {
+  if (e.target === $("#move-modal")) closeMoveDialog();
+});
+
+$("#lib-crumb-list").addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-crumb]");
+  if (btn) openFolder(btn.dataset.crumb || null);
+});
 
 /* ---------------- selection ---------------- */
 function selectAllVisible(on) {
@@ -1063,10 +1350,22 @@ function selectRange(from, to) {
 
 const libGrid = $("#lib-grid");
 libGrid.addEventListener("click", (e) => {
-  const tile = e.target.closest(".tile");
+  const rename = e.target.closest("[data-folder-rename]");
+  if (rename) { openFolderDialog(folderById(rename.dataset.folderRename)); return; }
+  const bin = e.target.closest("[data-folder-del]");
+  if (bin) { removeFolder(bin.dataset.folderDel); return; }
+  const folder = e.target.closest(".tile--folder");
+  if (folder) { openFolder(folder.dataset.folder); return; }
+  const tile = e.target.closest(".tile--doc");
   if (!tile || !e.shiftKey) return;
   e.preventDefault(); // the label would toggle just this one box
   selectRange(state.libAnchor, Number(tile.dataset.idx));
+});
+libGrid.addEventListener("keydown", (e) => {
+  const folder = e.target.closest(".tile--folder");
+  if (!folder || (e.key !== "Enter" && e.key !== " ")) return;
+  e.preventDefault();
+  openFolder(folder.dataset.folder);
 });
 libGrid.addEventListener("change", (e) => {
   const box = e.target.closest(".tile-input");
@@ -1074,6 +1373,58 @@ libGrid.addEventListener("change", (e) => {
   if (box.checked) state.libSel.add(box.dataset.id); else state.libSel.delete(box.dataset.id);
   state.libAnchor = Number(box.closest(".tile").dataset.idx);
   syncSelection();
+});
+
+/* dragging files onto a folder moves them — the shortest path for "this one
+   belongs in there" without a dialog */
+libGrid.addEventListener("dragstart", (e) => {
+  const tile = e.target.closest(".tile--doc");
+  if (!tile) return;
+  state.dragging = state.libSel.has(tile.dataset.id) ? [...state.libSel] : [tile.dataset.id];
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", state.dragging.join(","));
+});
+libGrid.addEventListener("dragend", () => {
+  state.dragging = null;
+  libGrid.querySelectorAll(".is-drop").forEach((el) => el.classList.remove("is-drop"));
+});
+libGrid.addEventListener("dragover", (e) => {
+  const folder = e.target.closest(".tile--folder");
+  if (!folder || !state.dragging) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "move";
+  folder.classList.add("is-drop");
+});
+libGrid.addEventListener("dragleave", (e) => {
+  const folder = e.target.closest(".tile--folder");
+  if (folder) folder.classList.remove("is-drop");
+});
+libGrid.addEventListener("drop", (e) => {
+  const folder = e.target.closest(".tile--folder");
+  if (!folder || !state.dragging) return;
+  e.preventDefault();
+  e.stopPropagation(); // the library-wide handler would treat it as an upload
+  const ids = state.dragging;
+  state.dragging = null;
+  folder.classList.remove("is-drop");
+  moveInto(ids, folder.dataset.folder);
+});
+
+/* the crumbs double as a target: drop on "全部文件" to take files out again */
+const crumbList = $("#lib-crumb-list");
+crumbList.addEventListener("dragover", (e) => {
+  if (!state.dragging) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "move";
+});
+crumbList.addEventListener("drop", (e) => {
+  if (!state.dragging) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const btn = e.target.closest("[data-crumb]");
+  const ids = state.dragging;
+  state.dragging = null;
+  moveInto(ids, btn ? btn.dataset.crumb || null : null);
 });
 
 $("#lib-all").addEventListener("change", (e) => selectAllVisible(e.target.checked));
@@ -1151,7 +1502,7 @@ async function deleteSelected() {
   try {
     await api("/api/documents/delete", { method: "POST", body: { ids } });
     state.libSel.clear();
-    await loadDocuments();
+    await loadLibrary();
   } catch (ex) {
     alert(ex.message);
   }
@@ -1159,6 +1510,14 @@ async function deleteSelected() {
 $("#lib-delete").addEventListener("click", deleteSelected);
 
 document.addEventListener("keydown", (e) => {
+  if (!$("#folder-modal").classList.contains("hidden")) {
+    if (e.key === "Escape") { e.preventDefault(); closeFolderDialog(); }
+    return;
+  }
+  if (!$("#move-modal").classList.contains("hidden")) {
+    if (e.key === "Escape") { e.preventDefault(); closeMoveDialog(); }
+    return;
+  }
   if (!$("#confirm-modal").classList.contains("hidden")) {
     if (e.key === "Escape") { e.preventDefault(); closeConfirm(false); }
     return;
@@ -1277,6 +1636,8 @@ async function uploadFiles(fileList) {
     for (let i = 0; i < files.length; i += UPLOAD_BATCH) {
       const batch = files.slice(i, i + UPLOAD_BATCH);
       const fd = new FormData();
+      // uploads land wherever the user is standing, not always at the root
+      if (state.libFolder) fd.append("folder_id", state.libFolder);
       batch.forEach((f) => fd.append("files", f));
       try {
         const data = await api("/api/documents", { method: "POST", body: fd });
@@ -1303,7 +1664,7 @@ async function uploadFiles(fileList) {
   renderUploadFails(fails);
   if (!fails.length) state.uploadTimer = setTimeout(hideUpload, 4000);
 
-  await loadDocuments();
+  await loadLibrary();
 }
 
 /* ---------------- chat rendering ---------------- */
@@ -1587,7 +1948,7 @@ function refreshForLang() {
   }
   renderBanner();
   loadConversations();
-  loadDocuments();
+  loadLibrary();
   if (integrateOpen()) {
     loadKeys();
     renderApiDocs();

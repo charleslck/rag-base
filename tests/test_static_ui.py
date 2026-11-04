@@ -135,3 +135,46 @@ def test_file_library_replaces_one_x_per_row_with_bulk_selection():
     for selector in (".lib-grid", ".tile.is-sel", ".lib-grid.is-list", ".lib-drop"):
         assert selector in css, selector
 
+
+def test_file_library_has_navigable_folders():
+    """Folders are a tree the UI walks; every edge of that walk is asserted here.
+
+    The failure mode without these checks is quiet: a folder tile that renders
+    but cannot be opened, or a move that posts to a route that does not exist.
+    """
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    app = (STATIC / "app.js").read_text(encoding="utf-8")
+    css = (STATIC / "styles.css").read_text(encoding="utf-8")
+    js = (STATIC / "i18n.js").read_text(encoding="utf-8")
+
+    for hook in ("lib-crumbs", "lib-crumb-list", "lib-new-folder", "lib-move",
+                 "folder-modal", "folder-name", "folder-save", "move-modal", "move-list"):
+        assert f'id="{hook}"' in html, hook
+
+    # the trail sits between the toolbar and the grid, where a file manager puts it
+    assert html.index('class="lib-head"') < html.index('id="lib-crumbs"') < html.index('id="lib-body"')
+
+    # navigation is a route through the tree, not a filter on a flat list
+    assert "function folderChain(" in app
+    assert "function childFolders(" in app
+    assert "state.libFolder" in app
+    assert 'data-crumb=' in app or "data-crumb=" in app
+    # a search spans the whole library, so the trail would be a lie while it runs
+    assert "nav.classList.toggle(\"hidden\", searching)" in app
+
+    # three write paths, all of them server-backed
+    for route in ('"/api/folders"', '"/api/folders/" + encodeURIComponent', '"/api/documents/move"'):
+        assert route in app, route
+
+    # moving by drag and dropping onto a folder, without the library-wide
+    # upload handler swallowing the drop
+    assert "e.stopPropagation(); // the library-wide handler would treat it as an upload" in app
+    assert ".tile--folder.is-drop" in css
+
+    # uploads follow the user into the open folder
+    assert 'fd.append("folder_id", state.libFolder)' in app
+
+    # deleting a folder must promise to keep the files, in both languages
+    assert len(re.findall(r'"lib\.folderDelPlain":', js)) == 2
+    assert len(re.findall(r'"lib\.folderDelSub":', js)) == 2
+

@@ -1,7 +1,7 @@
 """RAGbase — FastAPI application: auth, document management, RAG chat (SSE)."""
 import json
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -141,9 +141,17 @@ def documents(user: dict = Depends(auth.current_user)):
 
 
 @app.post("/api/documents")
-async def upload_documents(files: list[UploadFile] = File(...), user: dict = Depends(auth.current_user)):
+async def upload_documents(
+    files: list[UploadFile] = File(...),
+    folder_id: str = Form(""),
+    user: dict = Depends(auth.current_user),
+):
     if settings.max_docs_per_user and db.doc_count_for_user(user["id"]) + len(files) > settings.max_docs_per_user:
         raise HTTPException(400, f"Document limit reached ({settings.max_docs_per_user} per user).")
+    # uploads land in whatever folder is open, so validate before writing any of them
+    target = folder_id or None
+    if target and not db.get_folder(target, user["id"]):
+        raise HTTPException(404, "Folder not found")
     results = []
     import numpy as np
 
@@ -152,7 +160,7 @@ async def upload_documents(files: list[UploadFile] = File(...), user: dict = Dep
         if len(raw) > settings.max_upload_mb * 1024 * 1024:
             results.append({"filename": f.filename, "ok": False, "error": f"File too large (max {settings.max_upload_mb} MB)"})
             continue
-        doc_id = db.create_document(user["id"], f.filename or "unnamed")
+        doc_id = db.create_document(user["id"], f.filename or "unnamed", target)
         try:
             text = ingest.extract_text(f.filename or "", raw)
             chunks = ingest.chunk_text(text)
@@ -198,6 +206,69 @@ def delete_documents(body: BulkDeleteIn, user: dict = Depends(auth.current_user)
     if len(ids) > 500:
         raise HTTPException(400, "Too many documents in one request (max 500)")
     return {"deleted": db.delete_documents(ids, user["id"]), "requested": len(ids)}
+
+
+class MoveIn(BaseModel):
+    ids: list[str] = Field(default_factory=list)
+    folder_id: str | None = None  # None moves back to the root
+
+
+@app.post("/api/documents/move")
+def move_documents(body: MoveIn, user: dict = Depends(auth.current_user)):
+    ids = [d for d in dict.fromkeys(body.ids) if d]
+    if not ids:
+        raise HTTPException(400, "No document ids given")
+    if len(ids) > 500:
+        raise HTTPException(400, "Too many documents in one request (max 500)")
+    if body.folder_id and not db.get_folder(body.folder_id, user["id"]):
+        raise HTTPException(404, "Folder not found")
+    return {"moved": db.move_documents(ids, user["id"], body.folder_id)}
+
+
+# ---------------------------------------------------------------- folders
+
+class FolderIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    parent_id: str | None = None
+
+
+class FolderRename(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+@app.get("/api/folders")
+def folders(user: dict = Depends(auth.current_user)):
+    return {"folders": db.list_folders(user["id"])}
+
+
+@app.post("/api/folders")
+def create_folder(body: FolderIn, user: dict = Depends(auth.current_user)):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "Folder name is empty")
+    folder = db.create_folder(user["id"], name, body.parent_id)
+    if folder is None:
+        raise HTTPException(404, "Parent folder not found")
+    return folder
+
+
+@app.patch("/api/folders/{folder_id}")
+def rename_folder(folder_id: str, body: FolderRename, user: dict = Depends(auth.current_user)):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "Folder name is empty")
+    if not db.rename_folder(folder_id, user["id"], name):
+        raise HTTPException(404, "Folder not found")
+    return {"ok": True}
+
+
+@app.delete("/api/folders/{folder_id}")
+def delete_folder(folder_id: str, user: dict = Depends(auth.current_user)):
+    """Remove the folder and its subfolders; the documents go back to the root."""
+    result = db.delete_folder(folder_id, user["id"])
+    if result is None:
+        raise HTTPException(404, "Folder not found")
+    return result
 
 
 # ---------------------------------------------------------------- conversations

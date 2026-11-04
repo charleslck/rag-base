@@ -270,6 +270,8 @@ button { font-family: inherit; cursor: pointer; }
   border-radius: 8px; font-size: 13px; font-weight: 600; padding: 7px 12px;
 }
 .lib-act:hover { border-color: #3f4d5e; }
+.lib-act:disabled { opacity: .4; cursor: default; }
+.lib-act:disabled:hover { border-color: var(--border); }
 .lib-act--danger { color: var(--danger); }
 .lib-act--danger:hover { border-color: var(--danger); background: rgba(244, 135, 111, 0.08); }
 
@@ -331,6 +333,88 @@ button { font-family: inherit; cursor: pointer; }
 .is-list .tile-name { -webkit-line-clamp: 1; flex: 1; min-width: 0; }
 .is-list .tile-meta { flex-shrink: 0; max-width: 44%; text-align: right; }
 
+/* ---------- folders ---------- */
+/* the trail is also a drop target: drag a file onto "全部文件" to take it out */
+.lib-crumbs { flex-shrink: 0; padding: 0 20px 2px; }
+.lib-crumb-list {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
+  list-style: none; margin: 0; padding: 0;
+}
+.lib-crumb {
+  background: none; border: none; padding: 4px 7px; border-radius: 6px;
+  font-family: inherit; font-size: 12.5px; color: var(--text-dim); cursor: pointer;
+}
+.lib-crumb:hover { background: var(--panel-2); color: var(--text); }
+.lib-crumb.is-here { color: var(--text); font-weight: 600; cursor: default; }
+.lib-crumb.is-here:hover { background: none; }
+.lib-crumb-sep { color: #46545f; font-size: 12px; padding: 0 1px; }
+
+.tile--folder .tile-glyph { color: var(--accent); }
+.tile--folder.is-drop {
+  border-color: var(--accent);
+  background: rgba(198, 242, 78, 0.12);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.tile--folder:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tile-acts {
+  position: absolute; right: 7px; bottom: 7px; display: flex; gap: 4px;
+  opacity: 0; transition: opacity 120ms ease;
+}
+.tile:hover .tile-acts, .tile:focus-within .tile-acts { opacity: 1; }
+/* no hover on touch: rename and delete have to be visible to be reachable */
+@media (hover: none) { .tile-acts { opacity: 1; } }
+.tile-act {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 23px; height: 23px; padding: 0; border-radius: 6px;
+  background: var(--bg); border: 1px solid var(--border); color: var(--text-dim);
+}
+.tile-act:hover { color: var(--text); border-color: #46545f; }
+.tile-act--danger:hover { color: var(--danger); border-color: var(--danger); }
+.is-list .tile-acts { position: static; opacity: 1; margin-left: 8px; }
+/* a search hit shows where it lives; long paths get cut, not wrapped */
+.tile-where {
+  display: flex; align-items: center; gap: 4px; min-width: 0;
+  font-size: 11.5px; color: var(--text-dim); opacity: .8;
+}
+.tile-where svg { flex-shrink: 0; }
+.tile-where > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.is-list .tile-where { max-width: 32%; }
+
+/* new-folder button: same footprint as the view toggle beside it */
+.lib-new {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; padding: 0; flex-shrink: 0;
+  background: var(--bg); color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.lib-new:hover { color: var(--text); border-color: #35414f; }
+.lib-new:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.field-input {
+  width: 100%; padding: 9px 11px; font-size: 13.5px; font-family: inherit;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.field-input:focus { border-color: var(--accent); outline: none; }
+.field-input::placeholder { color: var(--text-dim); opacity: .7; }
+.folder-hint { margin: 9px 0 0; font-size: 12.5px; }
+.folder-hint[hidden] { display: none; }
+
+.move-list {
+  max-height: 268px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 8px; padding: 4px;
+}
+.move-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 10px 8px calc(8px + var(--d, 0) * 18px);
+  border-radius: 6px; font-size: 13px; cursor: pointer;
+}
+.move-row:hover { background: var(--panel-2); }
+.move-row input { accent-color: var(--accent); margin: 0; }
+.move-row.is-here { opacity: .45; cursor: default; }
+.move-row.is-here:hover { background: none; }
+.move-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .lib-empty {
   /* centred in the visible area, not pinned to the top of a 700px void */
   display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -381,13 +465,19 @@ button { font-family: inherit; cursor: pointer; }
 .btn-danger:hover { filter: brightness(1.06); }
 
 @media (max-width: 720px) {
-  .lib-head { padding: 12px 14px; gap: 10px; }
+  .lib-head { padding: 12px 14px; gap: 10px; align-items: flex-start; }
   .lib-title { width: 100%; }
   .lib-tools { margin-left: 0; width: 100%; }
-  .lib-search { flex: 1; min-width: 0; }
+  /* five controls do not fit one phone row: the search takes its own line
+     instead of being squeezed down to a magnifier and a single character */
+  .lib-search { flex: 1 1 100%; min-width: 0; }
+  .lib-sort { flex: 0 1 auto; min-width: 0; }
+  .lib-upload { margin-left: auto; }
   .lib-sel { margin-left: 0; width: 100%; gap: 8px; }
+  .lib-crumbs { padding: 0 14px 2px; }
   .lib-body { padding: 12px 14px 32px; }
   .lib-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+  .lib-empty { min-height: 44vh; }
   .is-list .tile-meta { max-width: 36%; }
   .up-panel { right: 12px; bottom: 12px; }
 }

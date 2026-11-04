@@ -55,8 +55,21 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             status TEXT NOT NULL DEFAULT 'ready',
             num_chunks INTEGER NOT NULL DEFAULT 0,
             error TEXT,
+            created_at REAL NOT NULL,
+            folder_id TEXT
+        );
+        -- Folders are a tree per user (parent_id). Deleting one puts its
+        -- documents back at the root instead of taking them with it, so a
+        -- mis-click never loses anything; folder_id is deliberately not a
+        -- foreign key, because the cascade would have to mean the opposite.
+        CREATE TABLE IF NOT EXISTS folders (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            parent_id TEXT,
             created_at REAL NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS idx_folders_user ON folders(user_id);
         CREATE TABLE IF NOT EXISTS chunks (
             id TEXT PRIMARY KEY,
             doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
@@ -116,6 +129,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     ):
         if column not in have:
             conn.execute(f"ALTER TABLE api_keys ADD COLUMN {column} {ddl}")
+
+    # documents.folder_id arrived with the file library's folders
+    docs = {r["name"] for r in conn.execute("PRAGMA table_info(documents)")}
+    if "folder_id" not in docs:
+        conn.execute("ALTER TABLE documents ADD COLUMN folder_id TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_docs_folder ON documents(folder_id)")
 
 
 def init_db() -> None:
@@ -206,12 +225,12 @@ def delete_user(uid: str) -> None:
 
 # ---------------------------------------------------------------- documents
 
-def create_document(user_id: str, filename: str) -> str:
+def create_document(user_id: str, filename: str, folder_id: str | None = None) -> str:
     did = new_id()
     conn = get_conn()
     conn.execute(
-        "INSERT INTO documents (id, user_id, filename, created_at) VALUES (?,?,?,?)",
-        (did, user_id, filename, now()),
+        "INSERT INTO documents (id, user_id, filename, created_at, folder_id) VALUES (?,?,?,?,?)",
+        (did, user_id, filename, now(), folder_id or None),
     )
     conn.commit()
     return did
@@ -225,7 +244,8 @@ def doc_count_for_user(user_id: str) -> int:
 
 def list_documents(user_id: str):
     rows = get_conn().execute(
-        "SELECT id, filename, status, num_chunks, error, created_at FROM documents WHERE user_id = ? ORDER BY created_at DESC",
+        "SELECT id, filename, status, num_chunks, error, created_at, folder_id "
+        "FROM documents WHERE user_id = ? ORDER BY created_at DESC",
         (user_id,),
     ).fetchall()
     return [dict(r) for r in rows]
@@ -304,6 +324,105 @@ def delete_documents(doc_ids, user_id: str) -> int:
     cur = conn.execute(
         f"DELETE FROM documents WHERE user_id = ? AND id IN ({','.join('?' * len(ids))})",
         [user_id, *ids],
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+# ---------------------------------------------------------------- folders
+# A per-user tree. Documents point at a folder with a plain column, so a
+# document can be moved with one UPDATE and nothing else has to stay in sync.
+
+def list_folders(user_id: str):
+    """Every folder of the user, plus how many documents sit directly inside."""
+    rows = get_conn().execute(
+        "SELECT f.id, f.name, f.parent_id, f.created_at, "
+        "(SELECT COUNT(*) FROM documents d WHERE d.folder_id = f.id) AS docs "
+        "FROM folders f WHERE f.user_id = ? ORDER BY f.created_at",
+        (user_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_folder(folder_id: str, user_id: str):
+    row = get_conn().execute(
+        "SELECT * FROM folders WHERE id = ? AND user_id = ?", (folder_id, user_id)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def create_folder(user_id: str, name: str, parent_id: str | None = None):
+    conn = get_conn()
+    if parent_id and not conn.execute(
+        "SELECT 1 FROM folders WHERE id = ? AND user_id = ?", (parent_id, user_id)
+    ).fetchone():
+        return None  # a parent id that is not yours is a 404, not a new root
+    fid = new_id()
+    conn.execute(
+        "INSERT INTO folders (id, user_id, name, parent_id, created_at) VALUES (?,?,?,?,?)",
+        (fid, user_id, name, parent_id or None, now()),
+    )
+    conn.commit()
+    return {"id": fid, "name": name, "parent_id": parent_id or None, "docs": 0}
+
+
+def rename_folder(folder_id: str, user_id: str, name: str) -> bool:
+    conn = get_conn()
+    cur = conn.execute(
+        "UPDATE folders SET name = ? WHERE id = ? AND user_id = ?", (name, folder_id, user_id)
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def _folder_subtree(conn: sqlite3.Connection, folder_id: str, user_id: str) -> list[str]:
+    rows = conn.execute(
+        "WITH RECURSIVE sub(id) AS ("
+        "  SELECT id FROM folders WHERE id = ? AND user_id = ?"
+        "  UNION ALL"
+        "  SELECT f.id FROM folders f JOIN sub ON f.parent_id = sub.id"
+        "  WHERE f.user_id = ?"
+        ") SELECT id FROM sub",
+        (folder_id, user_id, user_id),
+    ).fetchall()
+    return [r["id"] for r in rows]
+
+
+def delete_folder(folder_id: str, user_id: str):
+    """Drop a folder and everything under it; documents go back to the root.
+
+    Deleting the folders' documents instead would make one mis-click able to
+    destroy a hundred files — and there is a batch delete for that already.
+    """
+    conn = get_conn()
+    ids = _folder_subtree(conn, folder_id, user_id)
+    if not ids:
+        return None
+    marks = ",".join("?" * len(ids))
+    moved = conn.execute(
+        f"UPDATE documents SET folder_id = NULL WHERE user_id = ? AND folder_id IN ({marks})",
+        [user_id, *ids],
+    ).rowcount
+    conn.execute(
+        f"DELETE FROM folders WHERE user_id = ? AND id IN ({marks})", [user_id, *ids]
+    )
+    conn.commit()
+    return {"folders": len(ids), "documents": moved}
+
+
+def move_documents(doc_ids, user_id: str, folder_id: str | None = None) -> int:
+    """Put documents in a folder (or back at the root when folder_id is None)."""
+    ids = [d for d in dict.fromkeys(doc_ids) if d]
+    if not ids:
+        return 0
+    conn = get_conn()
+    if folder_id and not conn.execute(
+        "SELECT 1 FROM folders WHERE id = ? AND user_id = ?", (folder_id, user_id)
+    ).fetchone():
+        return 0
+    cur = conn.execute(
+        f"UPDATE documents SET folder_id = ? WHERE user_id = ? AND id IN ({','.join('?' * len(ids))})",
+        [folder_id or None, user_id, *ids],
     )
     conn.commit()
     return cur.rowcount

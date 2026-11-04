@@ -24,8 +24,9 @@ No vector database. No build step. One process, one SQLite file.
   becomes admin; admins can reset any user's password.
 - 📄 **Document ingestion** — PDF, DOCX, TXT, Markdown, HTML. Smart chunking with overlap,
   per-user quotas and upload-size limits.
-- 🗂️ **File library** — the knowledge base is a gallery, not a list: grid or list view,
-  search, sort, multi-select (shift-range, ⌘A, invert) and batch delete in one request.
+- 🗂️ **File library** — the knowledge base is a gallery, not a list: nested folders with a
+  breadcrumb, grid or list view, search, sort, multi-select (shift-range, ⌘A, invert) and
+  batch delete in one request.
   See [File library](#file-library).
 - 🧠 **Hybrid retrieval** — vector embeddings fused with **BM25 lexical search via RRF**
   (Reciprocal Rank Fusion). Precise on keywords, robust on semantics. Per-document
@@ -124,6 +125,21 @@ unusable at fifty.
 - **Upload with progress** — drop anywhere in the library, not on a small box. Files go up
   in batches of eight and the panel reports `12 / 100` with a per-file failure list, instead
   of greying the area out and hoping.
+- **Folders** — a real tree, as deep as you like: `合同 / 2026 / 华东区` instead of one long
+  name. The trail at the top is the way back, uploads land in the folder you are standing in,
+  and files move by dragging one onto a folder (or `Move to…` for a selection):
+
+  ```http
+  POST   /api/folders            {"name": "合同", "parent_id": null}  →  {"id": "…"}
+  PATCH  /api/folders/{id}       {"name": "Contracts"}
+  DELETE /api/folders/{id}       →  {"folders": 2, "documents": 5}
+  POST   /api/documents/move     {"ids": ["doc_1"], "folder_id": "…"}
+  ```
+
+  Deleting a folder **keeps its documents**: they go back to the root, together with the
+  ones in its subfolders. A folder is a place to put files, never a delete button — removing
+  files is a separate, confirmed action. Folders are an organising tool only; retrieval still
+  covers the whole knowledge base.
 
 ## Large knowledge bases
 

@@ -69,6 +69,7 @@ _TABLES_IN_DELETE_ORDER = (
     "embeddings",
     "chunks",
     "documents",
+    "folders",
     "users",
 )
 
