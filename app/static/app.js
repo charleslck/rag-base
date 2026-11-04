@@ -12,6 +12,14 @@ const state = {
   view: "welcome", // welcome | chat | auth
   banner: null, // "demo" | "embedding" | null
   bannerModel: "",
+  lastFocus: null, // element to restore focus to after closing the modal
+  apiTab: "curl", // which API snippet is showing
+  apiMode: "json", // json | stream
+  embedTab: "iframe", // iframe | sdk
+  lastKey: null, // most recently created API key, used in the snippets
+  editingKey: null, // key whose customizer is open
+  editorCfg: null, // working copy of that key's config
+  intTab: "embed", // embed | api | keys — which rail tab is showing
 };
 
 /* ---------------- helpers ---------------- */
@@ -153,46 +161,329 @@ function switchTab(which) {
   $("#tab-kb").classList.toggle("active", which === "kb");
   $("#pane-chats").classList.toggle("hidden", which !== "chats");
   $("#pane-kb").classList.toggle("hidden", which !== "kb");
-  $("#pane-int").classList.add("hidden");
-  $("#settings-btn").classList.remove("active");
+  closeIntegrate();
+}
+
+/* integrate opens as a modal: the sidebar keeps its current tab underneath */
+function integrateOpen() {
+  return !$("#int-modal").classList.contains("hidden");
 }
 
 function openIntegrate() {
-  $("#pane-chats").classList.add("hidden");
-  $("#pane-kb").classList.add("hidden");
-  $("#pane-int").classList.remove("hidden");
+  const modal = $("#int-modal");
+  state.lastFocus = document.activeElement;
+  closeEditor(); // always land on the list, never on a stale editor
+  modal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
   $("#settings-btn").classList.add("active");
+  closeSidebarMobile();
+  showIntTab(state.intTab);
   loadKeys();
   renderEmbedCode();
-  closeSidebarMobile();
+  renderApiDocs();
+  $("#int-close").focus();
+}
+
+function closeIntegrate() {
+  const modal = $("#int-modal");
+  if (modal.classList.contains("hidden")) return;
+  modal.classList.add("hidden");
+  document.body.classList.remove("modal-open");
+  $("#settings-btn").classList.remove("active");
+  if (state.lastFocus && state.lastFocus.isConnected) state.lastFocus.focus();
+  state.lastFocus = null;
 }
 
 $("#tab-chats").addEventListener("click", () => switchTab("chats"));
 $("#tab-kb").addEventListener("click", () => switchTab("kb"));
 $("#settings-btn").addEventListener("click", openIntegrate);
-$("#int-back").addEventListener("click", () => switchTab($("#tab-kb").classList.contains("active") ? "kb" : "chats"));
+$("#int-close").addEventListener("click", closeIntegrate);
+$("#int-modal").addEventListener("click", (e) => {
+  if (e.target === $("#int-modal")) closeIntegrate(); // click the dimmed backdrop
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && integrateOpen()) {
+    e.preventDefault();
+    if (state.editingKey) {
+      closeEditor();
+      loadKeys();
+    } else {
+      closeIntegrate();
+    }
+  }
+});
 
-/* ---------------- integrate: embed code + API keys ---------------- */
-function renderEmbedCode(key) {
-  const origin = location.origin;
-  const snippet =
-    '<!-- RAGbase chat widget -->\n' +
-    '<iframe src="' + origin + "/widget?key=" + (key || "YOUR_API_KEY") + '"\n' +
-    '  style="position:fixed;bottom:20px;right:20px;width:380px;height:600px;max-height:80vh;border:none;z-index:9999;border-radius:16px;box-shadow:0 8px 30px rgba(0,0,0,.35);"\n' +
-    '  title="Knowledge base chat"></iframe>';
-  $("#embed-code").value = snippet;
+/* ---------------- integrate: left rail tabs ---------------- */
+/* Embed / API / keys used to be three stacked sections with headings; the
+   headings are now a vertical tab rail, so only one pane is on screen. */
+function showIntTab(name) {
+  const tabs = document.querySelectorAll("#int-main [data-int-tab]");
+  if (!tabs.length) return;
+  let known = false;
+  tabs.forEach((tab) => {
+    const on = tab.dataset.intTab === name;
+    if (on) known = true;
+    tab.classList.toggle("active", on);
+    tab.setAttribute("aria-selected", on ? "true" : "false");
+    tab.tabIndex = on ? 0 : -1; // roving tabindex: one stop for the whole rail
+  });
+  if (!known) return showIntTab("embed");
+  document.querySelectorAll("#int-main .int-pane").forEach((pane) => {
+    pane.classList.toggle("active", pane.id === "int-pane-" + name);
+  });
+  state.intTab = name;
 }
 
+document.querySelectorAll("#int-main [data-int-tab]").forEach((tab) => {
+  tab.addEventListener("click", () => showIntTab(tab.dataset.intTab));
+});
+document.querySelectorAll("#int-main .int-nav").forEach((nav) => {
+  nav.addEventListener("keydown", (e) => {
+    const step = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[e.key];
+    if (step === undefined) return;
+    e.preventDefault();
+    const tabs = [...nav.querySelectorAll("[data-int-tab]")];
+    const i = tabs.findIndex((t) => t.classList.contains("active"));
+    const next = tabs[(i + step + tabs.length) % tabs.length];
+    showIntTab(next.dataset.intTab);
+    next.focus();
+  });
+});
+
+/* ---------------- integrate: embed code + API keys ---------------- */
+const EMBED_SNIPPETS = {
+  /* One attribute per line, and the 170-char style attribute broken at its
+     semicolons: both are legal HTML and produce the same thing when pasted,
+     but they keep every line inside the ~540px the dialog gives the block —
+     the only line that still overflows is the src, and that is just the key
+     being 43 characters long. */
+  iframe: (origin, key) =>
+    "<!-- RAGbase chat widget -->\n" +
+    "<iframe\n" +
+    '  src="' + origin + "/widget?key=" + key + '"\n' +
+    '  style="position:fixed;bottom:20px;right:20px;\n' +
+    "         width:380px;height:600px;max-height:80vh;\n" +
+    "         border:none;border-radius:16px;z-index:9999;\n" +
+    '         box-shadow:0 8px 30px rgba(0,0,0,.35);"\n' +
+    '  title="Knowledge base chat"></iframe>',
+  sdk: (origin, key) =>
+    "<!-- RAGbase embed SDK: the launcher and panel are built in -->\n" +
+    '<script src="' + origin + '/sdk.js"\n' +
+    '        data-key="' + key + '"\n' +
+    '        data-lang="' + currentLang() + '"><' + "/script>",
+};
+
+function renderEmbedCode(key) {
+  const apiKey = key || state.lastKey || "YOUR_API_KEY";
+  const code = EMBED_SNIPPETS[state.embedTab](location.origin, apiKey);
+  $("#embed-code").innerHTML = RAGhl.highlight(code, "html");
+}
+
+document.querySelectorAll("[data-embed-tab]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    state.embedTab = btn.dataset.embedTab;
+    document.querySelectorAll("[data-embed-tab]").forEach((b) => b.classList.toggle("active", b === btn));
+    renderEmbedCode();
+  });
+});
+
 $("#copy-embed").addEventListener("click", async () => {
-  try {
-    await navigator.clipboard.writeText($("#embed-code").value);
-    $("#copy-embed").textContent = t("int.embed.copied");
-  } catch {
-    $("#embed-code").select();
-    document.execCommand("copy");
-    $("#copy-embed").textContent = t("int.embed.copied");
-  }
+  await copyText($("#embed-code").textContent);
+  $("#copy-embed").textContent = t("int.embed.copied");
   setTimeout(() => ($("#copy-embed").textContent = t("int.embed.copy")), 1500);
+});
+
+/* "Open demo" jumps to the real embeddable page (/widget), the exact thing the
+   snippet above would inject. That page authenticates with an API key, so reuse
+   the key minted in this session or create a demo one on the spot. The blank
+   window is opened synchronously inside the click: doing it after the await
+   would make popup blockers swallow it. */
+async function ensureDemoKey() {
+  if (state.lastKey) return state.lastKey;
+  const data = await api("/api/api-keys", {
+    method: "POST",
+    body: { label: t("int.embed.demoKeyLabel") },
+  });
+  state.lastKey = data.key;
+  renderEmbedCode(data.key);
+  renderApiDocs();
+  await loadKeys();
+  return data.key;
+}
+
+$("#open-widget-demo").addEventListener("click", async () => {
+  const btn = $("#open-widget-demo");
+  if (btn.disabled) return;
+  const win = window.open("about:blank", "_blank");
+  if (win) win.opener = null;
+  btn.disabled = true;
+  try {
+    const key = await ensureDemoKey();
+    const url = location.origin + "/demo?key=" + encodeURIComponent(key) + "&lang=" + currentLang();
+    if (win) win.location.replace(url);
+    else location.href = url; // popup blocked: navigate this tab instead
+  } catch (ex) {
+    if (win) win.close();
+    alert(t("err.keyCreate", { msg: ex.message }));
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+/* ---------------- integrate: API access ----------------
+   One endpoint, one header, three languages, two response modes. The snippet
+   is rebuilt whenever the tab, the response mode or the language changes. */
+const API_SNIPPETS = {
+  json: {
+    curl: (url, key, q) =>
+      `curl -X POST ${url} \\
+  -H "Content-Type: application/json" \\
+  -H "X-API-Key: ${key}" \\
+  -d '{"message": "${q}"}'`,
+
+    python: (url, key, q) =>
+      `import requests
+
+API_KEY = "${key}"
+url = "${url}"
+
+r = requests.post(
+    url,
+    headers={"X-API-Key": API_KEY},
+    json={"message": "${q}"},
+    timeout=60,
+)
+data = r.json()
+print(data["answer"])
+for s in data["sources"]:
+    print(s["doc_name"], round(s["score"], 3))`,
+
+    node: (url, key, q) =>
+      `const res = await fetch("${url}", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-API-Key": "${key}",
+  },
+  body: JSON.stringify({ message: "${q}" }),
+});
+const { conversation_id, answer, sources } = await res.json();
+console.log(answer, sources);`,
+  },
+
+  stream: {
+    curl: (url, key, q) =>
+      `# -N keeps curl from buffering: frames print as they arrive
+curl -N -X POST ${url} \\
+  -H "Content-Type: application/json" \\
+  -H "X-API-Key: ${key}" \\
+  -d '{"message": "${q}", "stream": true}'`,
+
+    python: (url, key, q) =>
+      `import json
+import requests
+
+API_KEY = "${key}"
+url = "${url}"
+
+with requests.post(
+    url,
+    headers={"X-API-Key": API_KEY},
+    json={"message": "${q}", "stream": True},
+    stream=True,
+    timeout=60,
+) as r:
+    r.raise_for_status()
+    for line in r.iter_lines():
+        if not line or not line.startswith(b"data: "):
+            continue
+        event = json.loads(line[6:])
+        if "delta" in event:
+            print(event["delta"], end="", flush=True)
+        elif event.get("done"):
+            print("\\n", event["conversation_id"], event["sources"])`,
+
+    node: (url, key, q) =>
+      `const res = await fetch("${url}", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-API-Key": "${key}",
+  },
+  body: JSON.stringify({ message: "${q}", stream: true }),
+});
+
+const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+let buf = "";
+for (;;) {
+  const { value, done } = await reader.read();
+  if (done) break;
+  buf += value;
+  let cut;
+  while ((cut = buf.indexOf("\\n\\n")) !== -1) {
+    const frame = buf.slice(0, cut);
+    buf = buf.slice(cut + 2);
+    if (!frame.startsWith("data: ")) continue;
+    const event = JSON.parse(frame.slice(6));
+    if ("delta" in event) process.stdout.write(event.delta);
+    else if (event.done) {
+      console.log("\\n", event.conversation_id, event.sources);
+    }
+  }
+}`,
+  },
+};
+
+const API_SNIPPET_LANG = { curl: "bash", python: "python", node: "js" };
+
+function renderApiDocs() {
+  const url = location.origin + "/api/widget/chat";
+  const key = state.lastKey || "YOUR_API_KEY";
+  const code = API_SNIPPETS[state.apiMode][state.apiTab](url, key, t("int.api.sample"));
+  $("#api-endpoint").textContent = url;
+  $("#api-key-hint").textContent = key;
+  // the highlighter escapes every token, so the key cannot inject markup here
+  $("#api-snippet").innerHTML = RAGhl.highlight(code, API_SNIPPET_LANG[state.apiTab]);
+  $("#api-note").textContent = t(state.apiMode === "stream" ? "int.api.noteStream" : "int.api.note");
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  }
+}
+
+document.querySelectorAll(".code-tab[data-api-tab]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    state.apiTab = btn.dataset.apiTab;
+    document.querySelectorAll(".code-tab[data-api-tab]").forEach((b) => b.classList.toggle("active", b === btn));
+    renderApiDocs();
+  });
+});
+
+document.querySelectorAll(".mode-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    state.apiMode = btn.dataset.apiMode;
+    document.querySelectorAll(".mode-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    renderApiDocs();
+  });
+});
+
+$("#copy-api").addEventListener("click", async () => {
+  await copyText($("#api-snippet").textContent);
+  $("#copy-api").textContent = t("int.api.copied");
+  setTimeout(() => ($("#copy-api").textContent = t("int.api.copy")), 1500);
 });
 
 async function loadKeys() {
@@ -206,11 +497,16 @@ async function loadKeys() {
   for (const k of data.keys) {
     const item = document.createElement("div");
     item.className = "key-item";
+    const customised = k.allowed_origins.length > 0;
     item.innerHTML =
-      '<span class="key-prefix">' + esc(k.prefix) + '…</span>' +
+      '<span class="key-prefix">' + esc(k.prefix) + "…</span>" +
       '<span class="key-label">' + esc(k.label || "—") + "</span>" +
+      (customised ? '<span class="key-lock" title="' + esc(t("key.locked")) + '">●</span>' : "") +
+      '<button class="key-edit" aria-label="' + esc(t("key.edit")) + '" title="' + esc(t("key.edit")) + '">' +
+      '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M11.2 2.3a1.7 1.7 0 0 1 2.4 2.4L5.7 12.6l-3.1.7.7-3.1 7.9-7.9z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg></button>' +
       '<button class="key-del" aria-label="' + esc(t("int.keys.revoke")) + '" title="' + esc(t("int.keys.revoke")) + '">' +
       '<svg width="12" height="12" viewBox="0 0 14 14" fill="none"><path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button>';
+    item.querySelector(".key-edit").addEventListener("click", () => openEditor(k));
     item.querySelector(".key-del").addEventListener("click", async () => {
       await api("/api/api-keys/" + k.id, { method: "DELETE" });
       loadKeys();
@@ -227,10 +523,291 @@ $("#key-form").addEventListener("submit", async (e) => {
     $("#new-key-value").textContent = data.key;
     $("#new-key-box").classList.remove("hidden");
     $("#key-label").value = "";
+    state.lastKey = data.key;
     renderEmbedCode(data.key);
+    renderApiDocs();
     loadKeys();
   } catch (ex) {
     alert(t("err.keyCreate", { msg: ex.message }));
+  }
+});
+
+/* ---------------- per-key customizer ----------------
+   One editor serves both audiences: operators fill in the form and watch the
+   preview, developers copy the resulting values straight out of the API. */
+const ICON_SVG = {
+  chat: '<svg viewBox="0 0 24 24" fill="none"><path d="M20.5 11.6a8.3 8.3 0 0 1-8.9 8.3 9.4 9.4 0 0 1-4.1-.9L3.5 20.3l1.2-3.9a8.1 8.1 0 0 1-1.2-4.4 8.3 8.3 0 0 1 8.5-8A8.3 8.3 0 0 1 20.5 11.6z" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  spark: '<svg viewBox="0 0 24 24" fill="none"><path d="M12 3l1.9 5.3L19 10l-5.1 1.7L12 17l-1.9-5.3L5 10l5.1-1.7L12 3z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>',
+};
+
+function getPath(obj, path) {
+  return path.split(".").reduce((a, k) => (a == null ? undefined : a[k]), obj);
+}
+function setPath(obj, path, value) {
+  const parts = path.split(".");
+  let cur = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (typeof cur[parts[i]] !== "object" || cur[parts[i]] === null) cur[parts[i]] = {};
+    cur = cur[parts[i]];
+  }
+  cur[parts[parts.length - 1]] = value;
+}
+function normalizeHex(c) {
+  if (!c) return "#c6f24e";
+  if (/^#[0-9a-f]{3}$/i.test(c)) return "#" + c[1] + c[1] + c[2] + c[2] + c[3] + c[3];
+  return /^#[0-9a-f]{6}$/i.test(c) ? c : "#c6f24e";
+}
+
+function openEditor(key) {
+  state.editingKey = key;
+  state.editorCfg = JSON.parse(JSON.stringify(key.config || {}));
+  state.editorCfg.content = state.editorCfg.content || { docIds: [], quotaPerMin: 0, quotaPerDay: 0 };
+  $("#int-modal").classList.add("editing");
+  $("#int-main").classList.add("hidden");
+  $("#int-editor").classList.remove("hidden");
+  $("#editor-prefix").textContent = key.prefix + "…";
+  $("#editor-plan").classList.toggle("hidden", key.plan !== "pro");
+  $("#ed-origins").value = (key.allowed_origins || []).join("\n");
+  fillEditor();
+  renderPreview();
+  loadScopeDocs();
+  loadUsage(key.id);
+  $("#int-editor").scrollTop = 0;
+}
+
+function closeEditor() {
+  state.editingKey = null;
+  $("#int-modal").classList.remove("editing");
+  $("#int-editor").classList.add("hidden");
+  $("#int-main").classList.remove("hidden");
+}
+
+function syncConditionalRows() {
+  const cfg = state.editorCfg;
+  $("#row-logo").classList.toggle("hidden", getPath(cfg, "branding.icon") !== "logo");
+  $("#row-delay").classList.toggle("hidden", getPath(cfg, "behavior.autoOpen") !== "delay");
+}
+
+function fillEditor() {
+  const cfg = state.editorCfg;
+  document.querySelectorAll(".seg[data-seg]").forEach((seg) => {
+    const value = getPath(cfg, seg.dataset.seg);
+    seg.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.v === value));
+  });
+  document.querySelectorAll("[data-cfg]").forEach((el) => {
+    const value = getPath(cfg, el.dataset.cfg);
+    if (el.type === "checkbox") el.checked = !!value;
+    else el.value = value == null ? "" : value;
+  });
+  document.querySelectorAll("[data-cfg-lines]").forEach((el) => {
+    el.value = (getPath(cfg, el.dataset.cfgLines) || []).join("\n");
+  });
+  const color = normalizeHex(getPath(cfg, "branding.primaryColor"));
+  $("#ed-color").value = color;
+  document.querySelectorAll(".sw").forEach((s) =>
+    s.classList.toggle("active", s.dataset.color.toLowerCase() === color.toLowerCase()));
+
+  const pro = state.editingKey && state.editingKey.plan === "pro";
+  $("#ed-branding-hide").checked = !!getPath(cfg, "branding.hideBranding");
+  $("#ed-branding-hide").disabled = !pro;
+  syncConditionalRows();
+}
+
+async function loadScopeDocs() {
+  const box = $("#ed-docs");
+  box.innerHTML = '<span class="empty">' + esc(t("key.loading")) + "</span>";
+  let docs = [];
+  try {
+    docs = (await api("/api/documents")).documents || [];
+  } catch {
+    docs = [];
+  }
+  if (!docs.length) {
+    box.innerHTML = '<span class="empty">' + esc(t("key.noDocs")) + "</span>";
+    updateDocScope();
+    return;
+  }
+  const selected = new Set(getPath(state.editorCfg, "content.docIds") || []);
+  box.innerHTML = "";
+  for (const doc of docs) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.value = doc.id;
+    input.checked = selected.has(doc.id);
+    const span = document.createElement("span");
+    span.textContent = doc.filename;
+    label.append(input, span);
+    box.appendChild(label);
+  }
+  updateDocScope();
+}
+
+/* Scope list toolbar. "Nothing checked" is not "nothing allowed" — it means the
+   whole knowledge base — so the counter says that outright instead of printing
+   0/12, which reads like a key that can reach nothing. */
+function docBoxes() {
+  return [...document.querySelectorAll("#ed-docs input[type=checkbox]")];
+}
+
+function updateDocScope() {
+  const boxes = docBoxes();
+  const head = $("#ed-doc-head");
+  head.classList.toggle("hidden", boxes.length === 0);
+  if (!boxes.length) {
+    $("#ed-doc-count").textContent = "";
+    return;
+  }
+  const picked = boxes.filter((b) => b.checked).length;
+  $("#ed-doc-count").textContent = picked
+    ? t("key.docsCount", { n: picked, total: boxes.length })
+    : t("key.docsUnrestricted");
+  // select-all is a no-op once everything is already on; invert never is.
+  // aria-disabled rather than the disabled attribute: pressing this button can
+  // be the thing that makes it unavailable, and `disabled` would drop focus.
+  const all = $("#ed-docs-all");
+  const settled = picked === boxes.length;
+  all.setAttribute("aria-disabled", settled ? "true" : "false");
+  all.title = settled ? t("key.docsAllDone") : "";
+}
+
+function setDocChecks(pick) {
+  for (const box of docBoxes()) box.checked = pick(box.checked);
+  updateDocScope();
+}
+
+$("#ed-docs-all").addEventListener("click", (e) => {
+  if (e.currentTarget.getAttribute("aria-disabled") === "true") return;
+  setDocChecks(() => true);
+});
+$("#ed-docs-invert").addEventListener("click", () => setDocChecks((checked) => !checked));
+$("#ed-docs").addEventListener("change", updateDocScope);
+
+async function loadUsage(keyId) {
+  const box = $("#ed-usage");
+  try {
+    const data = await api("/api/api-keys/" + keyId + "/usage");
+    box.innerHTML =
+      "<span>" + esc(t("key.usageMin")) + " <b>" + data.usage.minute + "</b></span>" +
+      "<span>" + esc(t("key.usageDay")) + " <b>" + data.usage.day + "</b></span>" +
+      "<span>" + esc(t("key.usageTotal")) + " <b>" + data.usage.total + "</b></span>";
+  } catch {
+    box.textContent = "";
+  }
+}
+
+function renderPreview() {
+  const cfg = state.editorCfg;
+  if (!cfg) return;
+  const b = cfg.branding || {};
+  const beh = cfg.behavior || {};
+  const pv = $("#pv");
+  const prefersDark = !window.matchMedia || window.matchMedia("(prefers-color-scheme: dark)").matches;
+  pv.dataset.theme = b.theme === "auto" ? (prefersDark ? "dark" : "light") : (b.theme || "dark");
+
+  const accent = normalizeHex(b.primaryColor);
+  pv.style.setProperty("--pv-accent", accent);
+  $("#pv-title").textContent = b.title || t("key.pvTitle");
+  $("#pv-sub").textContent = b.subtitle || t("key.pvSub");
+  $("#pv-greeting").textContent = b.greeting || t("key.pvGreeting");
+  $("#pv-ph").textContent = b.placeholder || t("key.pvPh");
+  $("#pv-brand").style.display = b.hideBranding ? "none" : "";
+
+  const chips = $("#pv-chips");
+  const questions = (beh.starterQuestions || []).slice(0, 4);
+  chips.innerHTML = "";
+  chips.classList.toggle("hidden", !questions.length);
+  for (const q of questions) {
+    const s = document.createElement("span");
+    s.textContent = q;
+    chips.appendChild(s);
+  }
+
+  const launcher = $("#pv-launcher");
+  launcher.style.background = accent;
+  launcher.innerHTML = b.icon === "logo" && b.logoUrl
+    ? '<img src="' + esc(b.logoUrl) + '" alt="" style="width:100%;height:100%;border-radius:50%;object-fit:cover">'
+    : (ICON_SVG[b.icon] || ICON_SVG.chat);
+  launcher.style.color = "#131a08";
+}
+
+document.querySelectorAll(".seg[data-seg]").forEach((seg) => {
+  seg.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-v]");
+    if (!btn) return;
+    setPath(state.editorCfg, seg.dataset.seg, btn.dataset.v);
+    seg.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b === btn));
+    syncConditionalRows();
+    renderPreview();
+  });
+});
+
+document.querySelectorAll("[data-cfg]").forEach((el) => {
+  el.addEventListener("input", () => {
+    setPath(state.editorCfg, el.dataset.cfg, el.type === "checkbox" ? el.checked : el.value);
+    renderPreview();
+  });
+});
+
+document.querySelectorAll("[data-cfg-lines]").forEach((el) => {
+  el.addEventListener("input", () => {
+    const lines = el.value.split("\n").map((s) => s.trim()).filter(Boolean).slice(0, 4);
+    setPath(state.editorCfg, el.dataset.cfgLines, lines);
+    renderPreview();
+  });
+});
+
+document.querySelectorAll(".sw").forEach((sw) => {
+  sw.addEventListener("click", () => {
+    state.editorCfg.branding.primaryColor = sw.dataset.color;
+    $("#ed-color").value = sw.dataset.color;
+    document.querySelectorAll(".sw").forEach((s) => s.classList.toggle("active", s === sw));
+    renderPreview();
+  });
+});
+
+$("#ed-color").addEventListener("input", (e) => {
+  const hex = normalizeHex(e.target.value);
+  state.editorCfg.branding.primaryColor = hex;
+  document.querySelectorAll(".sw").forEach((s) =>
+    s.classList.toggle("active", s.dataset.color.toLowerCase() === hex.toLowerCase()));
+  renderPreview();
+});
+
+$("#ed-branding-hide").addEventListener("change", (e) => {
+  state.editorCfg.branding.hideBranding = e.target.checked;
+  renderPreview();
+});
+
+$("#editor-back").addEventListener("click", () => {
+  closeEditor();
+  loadKeys();
+});
+
+$("#editor-save").addEventListener("click", async () => {
+  if (!state.editingKey) return;
+  const btn = $("#editor-save");
+  const cfg = state.editorCfg;
+  cfg.content.docIds = [...document.querySelectorAll("#ed-docs input:checked")].map((i) => i.value);
+
+  btn.disabled = true;
+  try {
+    await api("/api/api-keys/" + state.editingKey.id, {
+      method: "PATCH",
+      body: {
+        label: state.editingKey.label || "",
+        config: cfg,
+        allowed_origins: $("#ed-origins").value.split("\n").map((s) => s.trim()).filter(Boolean),
+      },
+    });
+    btn.textContent = t("key.saved");
+    closeEditor();
+    await loadKeys();
+    setTimeout(() => (btn.textContent = t("key.save")), 1200);
+  } catch (ex) {
+    alert(t("err.keySave", { msg: ex.message }));
+  } finally {
+    btn.disabled = false;
   }
 });
 
@@ -292,11 +869,17 @@ const FILE_ICON =
 async function loadDocuments() {
   const data = await api("/api/documents");
   const list = $("#doc-list");
+  const counter = $("#doc-count");
   list.innerHTML = "";
   if (!data.documents.length) {
+    counter.hidden = true;
     list.innerHTML = '<p class="pane-empty">' + t("kb.empty") + "</p>";
     return;
   }
+  const chunks = data.documents.reduce((n, d) => n + (d.num_chunks || 0), 0);
+  counter.hidden = false;
+  counter.textContent = t(data.documents.length === 1 ? "kb.countOne" : "kb.count",
+    { n: data.documents.length, c: chunks });
   for (const doc of data.documents) {
     const item = document.createElement("div");
     item.className = "doc-item";
@@ -387,13 +970,64 @@ function showWelcome() {
   $("#sources-list").innerHTML = '<p class="dim sources-empty">' + esc(t("sources.empty")) + "</p>";
 }
 
+function mdInline(s) {
+  return s
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+    .replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
+}
+
 function renderMarkdownLite(text) {
-  // escape first, then apply minimal markdown: bold, italic, inline code
-  let h = esc(text);
-  h = h.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  h = h.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-  h = h.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
-  return h;
+  // Escape first, then a small block-level renderer: headings, lists, tables
+  // and paragraphs. Answers used to be a few sentences, so inline formatting
+  // was enough; now that retrieval can return a whole listing, the model
+  // replies with markdown structure and a literal "# " or "| a | b |" in the
+  // transcript reads as a rendering bug.
+  const lines = esc(text).split("\n");
+  const out = [];
+  let mode = null; // "ul" | "ol" | "table"
+  let firstRow = false;
+  const close = () => {
+    if (mode === "ul" || mode === "ol") out.push("</" + mode + ">");
+    else if (mode === "table") out.push("</tbody></table>");
+    mode = null;
+  };
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) { close(); continue; }
+
+    let m;
+    if ((m = line.match(/^(#{1,4})\s+(.*)$/))) {
+      close();
+      const h = Math.min(6, m[1].length + 2); // "# " -> h3, "## " -> h4
+      out.push("<h" + h + ">" + mdInline(m[2]) + "</h" + h + ">");
+      continue;
+    }
+    if ((m = line.match(/^[-*•●]\s+(.*)$/))) {
+      if (mode !== "ul") { close(); out.push("<ul>"); mode = "ul"; }
+      out.push("<li>" + mdInline(m[1]) + "</li>");
+      continue;
+    }
+    if ((m = line.match(/^\d+[.)、]\s*(.*)$/))) {
+      if (mode !== "ol") { close(); out.push("<ol>"); mode = "ol"; }
+      out.push("<li>" + mdInline(m[1]) + "</li>");
+      continue;
+    }
+    if (line.startsWith("|") && line.endsWith("|") && line.length > 2) {
+      const cells = line.slice(1, -1).split("|").map((c) => c.trim());
+      if (cells.every((c) => /^:?-{2,}:?$/.test(c))) continue; // |---|---| separator
+      if (mode !== "table") { close(); out.push("<table><tbody>"); mode = "table"; firstRow = true; }
+      const tag = firstRow ? "th" : "td";
+      firstRow = false;
+      out.push("<tr>" + cells.map((c) => "<" + tag + ">" + mdInline(c) + "</" + tag + ">").join("") + "</tr>");
+      continue;
+    }
+    close();
+    out.push("<p>" + mdInline(line) + "</p>");
+  }
+  close();
+  return out.join("");
 }
 
 function renderCitationChips(text) {
@@ -587,7 +1221,11 @@ function refreshForLang() {
   renderBanner();
   loadConversations();
   loadDocuments();
-  if (!$("#pane-int").classList.contains("hidden")) loadKeys();
+  if (integrateOpen()) {
+    loadKeys();
+    renderApiDocs();
+    if (state.editingKey) updateDocScope(); // its counter is built with t()
+  }
   if (state.streaming) return; // don't clobber an answer that is still streaming
   if (state.conversationId) {
     api("/api/conversations/" + state.conversationId + "/messages")

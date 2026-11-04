@@ -6,29 +6,49 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import auth, database as db, ingest, providers, rag
+from . import auth, database as db, ingest, providers, quota, rag, widget_config
 from .config import settings
 
 app = FastAPI(title="RAGbase", version="1.0.0")
 
 
+def _cors_headers(origin: str) -> dict:
+    """Echo the caller's origin. Widget traffic is allow-listed per key, so a
+    wildcard would hand any site the ability to spend a customer's quota."""
+    return {
+        "Access-Control-Allow-Origin": origin or "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, X-API-Key",
+        "Access-Control-Max-Age": "86400",
+        "Vary": "Origin",
+    }
+
+
+def _key_from_request(request: Request) -> str:
+    """Widget calls carry the key in a header (API) or the query (page loads)."""
+    return request.headers.get("x-api-key") or request.query_params.get("key", "")
+
+
 @app.middleware("http")
 async def widget_cors(request: Request, call_next):
-    """Allow browser JS on customer sites to call /api/widget/* cross-origin."""
+    """Allow approved sites to call /api/widget/* and refuse everyone else."""
     if request.url.path.startswith("/api/widget"):
-        if request.method == "OPTIONS":
+        origin = request.headers.get("origin", "")
+        record = db.get_api_key_record(_key_from_request(request))
+        allowed = widget_config.parse_origins(record["allowed_origins"]) if record else []
+        # server-to-server callers send no Origin and are trusted by holding the
+        # key; only browser requests are subject to the allow-list
+        if origin and not widget_config.origin_allowed(allowed, origin):
             return Response(
-                status_code=200,
-                headers={
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Methods": "POST, OPTIONS",
-                    "Access-Control-Allow-Headers": "Content-Type, X-API-Key",
-                    "Access-Control-Max-Age": "86400",
-                },
+                status_code=403,
+                content='{"detail":"This origin is not allowed for the supplied API key"}',
+                media_type="application/json",
             )
+        if request.method == "OPTIONS":
+            return Response(status_code=200, headers=_cors_headers(origin))
         response = await call_next(request)
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key"
+        for name, value in _cors_headers(origin).items():
+            response.headers[name] = value
         return response
     if request.url.path == "/" or request.url.path.startswith("/static"):
         # static assets must never be cached across deploys: the HTML and JS
@@ -243,6 +263,19 @@ class ApiKeyIn(BaseModel):
     label: str = ""
 
 
+class ApiKeyPatchIn(BaseModel):
+    label: str | None = None
+    config: dict | None = None
+    allowed_origins: list[str] | str | None = None
+
+
+def _decoded_key(key: dict) -> dict:
+    """Present a key row the way the dashboard edits it."""
+    key["config"] = widget_config.normalize_config(key["config"], key["plan"])
+    key["allowed_origins"] = widget_config.parse_origins(key["allowed_origins"])
+    return key
+
+
 @app.post("/api/api-keys")
 def create_key(body: ApiKeyIn, user: dict = Depends(auth.current_user)):
     record, full = db.create_api_key(user["id"], body.label)
@@ -251,7 +284,46 @@ def create_key(body: ApiKeyIn, user: dict = Depends(auth.current_user)):
 
 @app.get("/api/api-keys")
 def list_keys(user: dict = Depends(auth.current_user)):
-    return {"keys": db.list_api_keys(user["id"])}
+    return {"keys": [_decoded_key(k) for k in db.list_api_keys(user["id"])]}
+
+
+@app.patch("/api/api-keys/{key_id}")
+def patch_key(key_id: str, body: ApiKeyPatchIn, user: dict = Depends(auth.current_user)):
+    """Edit branding, behaviour, scope and the origin allow-list of one key."""
+    existing = db.get_api_key(key_id, user["id"])
+    if not existing:
+        raise HTTPException(404, "API key not found")
+
+    fields: dict = {}
+    if body.label is not None:
+        fields["label"] = body.label.strip()[:80]
+    if body.allowed_origins is not None:
+        origins = widget_config.parse_origins(body.allowed_origins)
+        # a typo must not silently leave the key open to the whole internet
+        if body.allowed_origins and not origins:
+            raise HTTPException(400, "No valid domain found in the allow-list")
+        fields["allowed_origins"] = "\n".join(origins)
+    if body.config is not None:
+        merged = widget_config.merge_config(existing["config"], body.config)
+        fields["config"] = widget_config.normalize_config(merged, existing["plan"])
+    if not fields:
+        raise HTTPException(400, "Nothing to update")
+
+    db.update_api_key(key_id, user["id"], fields)
+    return {"ok": True, "key": _decoded_key(db.get_api_key(key_id, user["id"]))}
+
+
+@app.get("/api/api-keys/{key_id}/usage")
+def key_usage(key_id: str, user: dict = Depends(auth.current_user)):
+    key = db.get_api_key(key_id, user["id"])
+    if not key:
+        raise HTTPException(404, "API key not found")
+    content = widget_config.normalize_config(key["config"], key["plan"])["content"]
+    return {
+        "usage": quota.usage(key_id),
+        "limits": {"perMin": content["quotaPerMin"], "perDay": content["quotaPerDay"]},
+        "plan": key["plan"],
+    }
 
 
 @app.delete("/api/api-keys/{key_id}")
@@ -264,41 +336,164 @@ def revoke_key(key_id: str, user: dict = Depends(auth.current_user)):
 class WidgetChatIn(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     conversation_id: str | None = None
+    stream: bool = False
 
 
-def _widget_user(x_api_key: str | None = Header(None)) -> dict:
-    if not x_api_key:
+def _widget_key(request: Request, x_api_key: str | None = Header(None)) -> dict:
+    """Resolve an API key to its record, enforcing that key's origin allow-list.
+
+    The key arrives in a header for API calls and in the query string when the
+    embed page asks for its own configuration.
+    """
+    token = x_api_key or request.query_params.get("key", "")
+    if not token:
         raise HTTPException(401, "Missing X-API-Key header")
-    user = db.get_user_by_api_key(x_api_key)
-    if not user:
+    record = db.get_api_key_record(token)
+    if not record:
         raise HTTPException(401, "Invalid API key")
-    return user
+    origin = request.headers.get("origin", "")
+    allowed = widget_config.parse_origins(record["allowed_origins"])
+    if origin and not widget_config.origin_allowed(allowed, origin):
+        raise HTTPException(403, "This origin is not allowed for the supplied API key")
+    return record
 
 
-@app.post("/api/widget/chat")
-def widget_chat(body: WidgetChatIn, user: dict = Depends(_widget_user)):
-    """Non-streaming chat for embeds/integrations. Conversation is kept alive
-    by passing back the conversation_id we return."""
+@app.get("/api/widget/config")
+def widget_public_config(record: dict = Depends(_widget_key)):
+    """Branding + behaviour for the embed to render itself.
+
+    Scoping and quota stay out of this payload: a visitor can read it in the
+    page source, and neither belongs to them.
+    """
+    cfg = widget_config.normalize_config(record["config"], record["plan"])
+    return {
+        "config": widget_config.public_config(cfg),
+        "plan": record["plan"],
+        "whiteLabel": {
+            "available": record["plan"] == "pro",
+            "hidden": cfg["branding"]["hideBranding"],
+        },
+    }
+
+
+def _widget_turn(record: dict, body: WidgetChatIn) -> tuple[str, str, list[dict]]:
+    """Resolve (or open) the conversation and persist the user turn."""
+    user_id = record["user_id"]
     question = body.message.strip()
-    if body.conversation_id and db.get_conversation(body.conversation_id, user["id"]):
+    if not question:
+        raise HTTPException(400, "Empty message")
+    if body.conversation_id and db.get_conversation(body.conversation_id, user_id):
         cid = body.conversation_id
     else:
-        cid = db.create_conversation(user["id"], "[widget] " + question[:50])
+        cid = db.create_conversation(user_id, "[widget] " + question[:50])
     history = [
         {"role": m["role"], "content": m["content"]}
         for m in db.get_messages(cid)
         if m["role"] in ("user", "assistant")
     ][-20:]
     db.add_message(cid, "user", question)
-    text, sources = rag.answer_once(user["id"], question, history)
-    db.add_message(cid, "assistant", text, sources)
-    return {"conversation_id": cid, "answer": text, "sources": sources}
+    return cid, question, history
+
+
+@app.post("/api/widget/chat")
+def widget_chat(body: WidgetChatIn, record: dict = Depends(_widget_key)):
+    """Chat for embeds and server-to-server integrations.
+
+    Returns JSON by default. With `"stream": true` it answers with the same
+    `text/event-stream` the web app uses: `data: {"delta": ...}` per token,
+    then `data: {"done": true, "conversation_id": ..., "sources": [...]}`.
+    Multi-turn conversations are kept alive by passing conversation_id back.
+    """
+    cfg = widget_config.normalize_config(record["config"], record["plan"])
+    content, behavior = cfg["content"], cfg["behavior"]
+
+    allowed, status = quota.check(record["id"], content["quotaPerMin"], content["quotaPerDay"])
+    if not allowed:
+        raise HTTPException(
+            429,
+            f"Rate limit exceeded ({status['reason']}): this key allows "
+            f"{status['limit']} requests per {status['reason']}.",
+            headers={"Retry-After": str(status["retryAfter"])},
+        )
+
+    cid, question, history = _widget_turn(record, body)
+    scope = {"doc_ids": content["docIds"], "fallback": behavior["fallbackMessage"]}
+
+    if not body.stream:
+        text, sources = rag.answer_once(record["user_id"], question, history, **scope)
+        db.add_message(cid, "assistant", text, sources)
+        return {"conversation_id": cid, "answer": text, "sources": sources}
+
+    def stream():
+        parts, sources = [], []
+        try:
+            for event, payload in rag.answer_stream(record["user_id"], question, history, **scope):
+                if event == "delta":
+                    parts.append(payload)
+                    yield f"data: {json.dumps({'delta': payload})}\n\n"
+                else:
+                    sources = payload
+        finally:
+            full = "".join(parts).strip()
+            db.add_message(cid, "assistant", full, sources=sources or None)
+        yield f"data: {json.dumps({'done': True, 'conversation_id': cid, 'sources': sources})}\n\n"
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # nginx must not buffer the stream
+        },
+    )
+
+
+def _frame_ancestors(allowed: list[str]) -> str:
+    """CSP value pinning who may iframe this page (browser-enforced, no bypass)."""
+    if "*" in allowed:
+        return "*"
+    parts = ["'self'"]  # the /demo preview lives on this origin
+    for host in allowed:
+        parts.append("https://" + host)
+        parts.append("http://" + host)
+    return " ".join(parts)
 
 
 @app.get("/widget")
-def widget_page():
-    """Standalone embeddable chat page: <iframe src="https://host/widget?key=rbk_...">"""
-    return FileResponse(settings.base_dir + "/static/widget.html")
+def widget_page(key: str = ""):
+    """Standalone embeddable chat page: <iframe src="https://host/widget?key=rbk_...">
+
+    A key with a configured allow-list advertises it through `frame-ancestors`,
+    so browsers refuse to render the widget on any other domain.
+    """
+    response = FileResponse(settings.base_dir + "/static/widget.html")
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    # the widget is versioned with the JS it loads: a stale cached copy would
+    # keep calling removed endpoints after an upgrade
+    response.headers["Cache-Control"] = "no-cache"
+    record = db.get_api_key_record(key) if key else None
+    if record:
+        allowed = widget_config.parse_origins(record["allowed_origins"])
+        if allowed:
+            response.headers["Content-Security-Policy"] = "frame-ancestors " + _frame_ancestors(allowed)
+    return response
+
+
+@app.get("/demo")
+def demo_page():
+    """Simulated customer site: an empty page whose bottom-right launcher opens
+    the widget in a floating panel — the same thing the embed snippet produces."""
+    return FileResponse(settings.base_dir + "/static/demo.html", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/sdk.js")
+def sdk_script():
+    """Loader for developers: <script src=".../sdk.js" data-key="rbk_..."></script>"""
+    return FileResponse(
+        settings.base_dir + "/static/sdk.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
 
 
 # ---------------------------------------------------------------- admin
@@ -315,6 +510,20 @@ def admin_stats(_: dict = Depends(auth.require_admin)):
 
 class ResetPasswordIn(BaseModel):
     new_password: str = Field(min_length=6, max_length=128)
+
+
+class PlanIn(BaseModel):
+    plan: str
+
+
+@app.patch("/api/admin/api-keys/{key_id}/plan")
+def admin_set_plan(key_id: str, body: PlanIn, _: dict = Depends(auth.require_admin)):
+    """Grant or revoke white-label. Only an admin can move a key to `pro`."""
+    if body.plan not in ("free", "pro"):
+        raise HTTPException(400, "plan must be 'free' or 'pro'")
+    if not db.set_key_plan(key_id, body.plan):
+        raise HTTPException(404, "API key not found")
+    return {"ok": True, "plan": body.plan}
 
 
 @app.post("/api/admin/users/{uid}/reset-password")

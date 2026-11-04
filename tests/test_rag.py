@@ -283,3 +283,150 @@ def test_retrieve_pads_when_the_query_vector_is_smaller(monkeypatch):
     hits = rag.retrieve(uid, "refund policy")  # 8-d query, 512-d stored vectors
 
     assert hits
+
+
+# ------------------------------------------------ corpus-wide questions
+# A hundred small documents cannot be summarised by six passages: the model
+# then reports whichever six scored highest as if that were the whole base.
+# These cover the widening + inventory path that fixes it.
+
+
+def _people(uid: str, n: int = 12) -> list[str]:
+    """`n` one-chunk documents shaped like a profile base."""
+    return [
+        seed_document(
+            uid,
+            f"{i:03d}-person{i}.pdf",
+            [f"{i:03d}｜person{i}\n 类别：电影男演员 ｜ 第 {i} 号人物 ｜ 代表作若干\n人物简介\nperson{i} 是第 {i} 位。"],
+        )
+        for i in range(1, n + 1)
+    ]
+
+
+def test_corpus_question_detects_a_collection_sweep():
+    assert rag.is_corpus_question("这个知识库里有哪些明星？", ["021-周星驰.pdf"])
+    assert rag.is_corpus_question("列出所有导演", ["021-周星驰.pdf"])
+    assert rag.is_corpus_question("how many documents are in here", ["faq.txt"])
+
+
+def test_corpus_question_keeps_named_lookups_narrow():
+    """`哪些` alone is not a sweep: naming a document means one lookup.
+
+    "周星驰演过哪些电影" must not drag the whole base into the prompt.
+    """
+    names = ["021-周星驰.pdf", "001-张艺谋.pdf"]
+    assert not rag.is_corpus_question("周星驰演过哪些电影？", names)
+    assert not rag.is_corpus_question("张艺谋都拿过哪些奖", names)
+
+
+def test_corpus_question_needs_a_listing_marker_at_all():
+    assert not rag.is_corpus_question("周星驰是谁", ["021-周星驰.pdf"])
+    assert rag.has_enumeration_marker("有哪些歌手") is True
+    assert rag.has_enumeration_marker("refund policy") is False
+
+
+def test_retrieve_breadth_takes_one_chunk_per_document(patch_settings):
+    uid = create_test_user()
+    doc_id = seed_document(uid, "big.txt", [f"Refund policy clause {i}: refunds in 5 days." for i in range(6)])
+
+    narrow = rag.retrieve(uid, "refund policy", top_k=6)
+    wide = rag.retrieve(uid, "refund policy", top_k=6, breadth=True)
+
+    assert sum(1 for h in narrow if h["doc_id"] == doc_id) > 1
+    assert sum(1 for h in wide if h["doc_id"] == doc_id) == 1
+
+
+def test_retrieve_breadth_uses_the_configured_list_top_k(patch_settings):
+    uid = create_test_user()
+    _people(uid, 8)
+
+    with patch_settings(list_top_k=3):
+        assert len(rag.retrieve(uid, "电影男演员", breadth=True)) <= 3
+
+
+def test_corpus_inventory_lists_every_document_with_its_opening():
+    uid = create_test_user()
+    _people(uid, 5)
+
+    inventory = rag.corpus_inventory(uid)
+
+    assert "5 documents in total" in inventory
+    assert "001-person1.pdf: 001｜person1" in inventory
+    assert "类别：电影男演员" in inventory  # the category, not just the filename
+    assert sum(1 for line in inventory.split("\n") if line.startswith("- ") and ".pdf" in line) == 5
+
+
+def test_corpus_inventory_respects_the_key_document_scope():
+    uid = create_test_user()
+    ids = _people(uid, 4)
+
+    inventory = rag.corpus_inventory(uid, doc_ids=ids[:2])
+
+    assert "2 documents in total" in inventory
+    assert "001-person1.pdf" in inventory
+    assert "004-person4.pdf" not in inventory
+
+
+def test_corpus_inventory_is_capped_by_character_budget():
+    uid = create_test_user()
+    _people(uid, 20)
+
+    inventory = rag.corpus_inventory(uid, budget=400)
+
+    # the budget stops the listing early and the header admits it
+    assert "documents in total, showing" in inventory
+    assert "020-person20.pdf" not in inventory
+    assert len(inventory) < 1400  # 400 of lines + the fixed instruction block
+
+
+def test_build_messages_appends_the_inventory():
+    inventory = "Knowledge-base inventory (2 documents in total):\n- a.pdf: head a"
+    messages = rag.build_messages("why?", [_context(1)], [], True, inventory)
+
+    system = messages[0]["content"]
+    assert "[1] (from faq.txt)" in system
+    assert system.index("Knowledge-base context") < system.index("Knowledge-base inventory")
+
+
+def test_answer_once_widens_for_a_corpus_question(monkeypatch):
+    uid = create_test_user()
+    _people(uid, 10)
+    seen = {}
+
+    def fake_chat(messages, contexts=None):
+        seen["system"] = messages[0]["content"]
+        seen["contexts"] = len(contexts or [])
+        return "ok"
+
+    monkeypatch.setattr(providers, "chat_once", fake_chat)
+
+    rag.answer_once(uid, "这个知识库里都有哪些人", [])
+
+    assert "Knowledge-base inventory (10 documents in total)" in seen["system"]
+    assert seen["contexts"] > 6  # wider than the default top_k
+
+
+def test_answer_once_stays_narrow_for_a_named_lookup(monkeypatch):
+    uid = create_test_user()
+    _people(uid, 10)
+    seen = {}
+
+    def fake_chat(messages, contexts=None):
+        seen["system"] = messages[0]["content"]
+        return "ok"
+
+    monkeypatch.setattr(providers, "chat_once", fake_chat)
+
+    rag.answer_once(uid, "person3 演过哪些作品", [])
+
+    assert "inventory" not in seen["system"]
+
+
+def test_build_messages_does_not_say_nothing_was_retrieved_when_an_inventory_exists():
+    """The empty-retrieval wording contradicts the inventory right below it."""
+    inventory = "Knowledge-base inventory (3 documents in total):\n- a.pdf: head a"
+    system = rag.build_messages("哪些人?", [], [], True, inventory)[0]["content"]
+
+    assert "no relevant passages were retrieved" not in system
+    assert "no passage matched this question" in system
+    assert "Knowledge-base inventory (3 documents in total)" in system

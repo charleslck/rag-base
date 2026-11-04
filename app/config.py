@@ -72,6 +72,14 @@ class Settings:
     chunk_overlap: int = int(os.environ.get("RAGBASE_CHUNK_OVERLAP", "150"))
     top_k: int = int(os.environ.get("RAGBASE_TOP_K", "6"))
     retrieval_threshold: float = float(os.environ.get("RAGBASE_RETRIEVAL_THRESHOLD", "0.15"))
+    # A question about the corpus as a whole ("which singers are in here?")
+    # cannot be answered from six passages — the model just reports whichever
+    # six scored highest and presents them as the complete list. Such questions
+    # get a wider net plus a one-line-per-document inventory.
+    list_top_k: int = int(os.environ.get("RAGBASE_LIST_TOP_K", "20"))
+    inventory_docs: int = int(os.environ.get("RAGBASE_INVENTORY_DOCS", "200"))
+    # total characters of retrieved text handed to the model, inventory included
+    context_chars: int = int(os.environ.get("RAGBASE_CONTEXT_CHARS", "24000"))
 
     @property
     def db_path(self) -> str:

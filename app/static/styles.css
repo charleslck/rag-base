@@ -166,9 +166,6 @@ button { font-family: inherit; cursor: pointer; }
   font-size: 13.5px; font-weight: 600;
 }
 .settings-btn:hover, .settings-btn.active { background: var(--panel-2); color: var(--text); }
-.int-head { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
-.int-head h3 { font-size: 14px; font-weight: 800; }
-.int-back { width: 32px; height: 32px; }
 
 .conv-item {
   width: 100%; text-align: left; padding: 9px 11px; margin-bottom: 3px;
@@ -192,6 +189,13 @@ button { font-family: inherit; cursor: pointer; }
 .drop-zone strong { color: var(--text); font-size: 14px; }
 .drop-zone.dragover, .drop-zone:hover { border-color: var(--accent); background: rgba(198, 242, 78, 0.04); }
 
+/* how many documents the base actually holds — with a few hundred uploads the
+   list alone gives no sense of scale, and "did they all arrive?" is the first
+   question a bulk upload raises */
+.doc-count {
+  font-size: 12px; color: var(--text-dim); font-weight: 600;
+  letter-spacing: .02em; margin: -4px 0 10px 2px;
+}
 .doc-item {
   display: flex; align-items: flex-start; gap: 10px;
   padding: 10px 11px; border: 1px solid var(--border); border-radius: var(--radius);
@@ -206,19 +210,163 @@ button { font-family: inherit; cursor: pointer; }
 .doc-del:hover { color: var(--danger); }
 
 /* ---------- Integrate pane ---------- */
-.int-section { margin-bottom: 20px; }
-.int-section h3 { font-size: 14px; font-weight: 800; margin-bottom: 6px; }
-.int-section > .dim { font-size: 12.5px; margin-bottom: 10px; line-height: 1.5; }
-#embed-code {
-  width: 100%; resize: vertical; font-family: var(--mono); font-size: 11px;
-  background: var(--bg); color: var(--text); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 10px; line-height: 1.55; margin-bottom: 8px;
+/* The three section titles became a left rail: one pane visible at a time.
+   The rail keeps the colour coding the headings used to carry. */
+/* id beats .modal-body, which is declared later and would re-add its padding */
+#int-main.int-layout {
+  display: grid; grid-template-columns: 156px minmax(0, 1fr);
+  flex: 1 1 auto; min-height: 0;
+  padding: 0; overflow: hidden;
+}
+.int-nav {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 14px 10px; background: var(--bg);
+  border-right: 1px solid var(--border);
+}
+.int-tab {
+  position: relative;
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 10px; border: 0; border-radius: 8px;
+  background: none; color: var(--text-dim);
+  font: inherit; font-size: 13px; font-weight: 600; text-align: left;
+  cursor: pointer; transition: background .14s, color .14s;
+}
+.int-tab:hover { background: var(--panel-2); color: var(--text); }
+.int-tab.active { background: var(--panel-2); color: var(--text); }
+.int-tab.active::before {
+  content: ""; position: absolute; left: -10px; top: 50%;
+  width: 3px; height: 18px; transform: translateY(-50%);
+  border-radius: 0 3px 3px 0; background: var(--tab-dot, var(--accent));
+}
+.int-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.int-dot {
+  flex: none; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--tab-dot, var(--accent));
+}
+.int-tab:nth-of-type(2) { --tab-dot: #6ec3f2; }
+.int-tab:nth-of-type(3) { --tab-dot: #c9a2f5; }
+
+.int-panes { padding: 16px 18px; overflow-y: auto; min-width: 0; }
+.int-pane { display: none; }
+.int-pane.active { display: block; }
+.int-pane:focus-visible { outline: none; }
+.int-pane > .dim, .int-lead .dim { font-size: 12.5px; line-height: 1.5; }
+.int-pane > .dim { margin-bottom: 12px; }
+/* embed pane: description grows, demo button stays pinned to the right */
+.int-lead { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
+.int-lead .dim { flex: 1; min-width: 0; }
+/* preview link for the embeddable widget — opens /demo in a new tab */
+.demo-btn {
+  display: inline-flex; align-items: center; gap: 5px; flex: none;
+  padding: 4px 10px; border-radius: 999px;
+  background: none; color: var(--accent);
+  border: 1px solid var(--border);
+  font-size: 12px; font-weight: 600; white-space: nowrap;
+  transition: border-color .15s, background .15s;
+}
+.demo-btn:hover { border-color: var(--accent); background: var(--panel-2); }
+.demo-btn:disabled { opacity: .5; cursor: progress; }
+/* narrow screens: the rail turns into a horizontal strip above the pane */
+@media (max-width: 640px) {
+  #int-main.int-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .int-nav {
+    flex-direction: row; gap: 4px;
+    padding: 8px 10px; overflow-x: auto;
+    border-right: 0; border-bottom: 1px solid var(--border);
+  }
+  .int-tab { white-space: nowrap; }
+  .int-tab.active::before { content: none; }
+  .int-panes { padding: 14px; }
+}
+/* the embed snippet is a real code block too — same theme, but no language tab
+   above it, so it gets all four corners. No min-height: an empty six-line box
+   looked like a rendering bug, and the dialog's own 600px floor already stops
+   the frame from jumping when you switch between iframe and <script> */
+.code-block--embed {
+  border-radius: var(--radius);
+  margin-bottom: 8px;
 }
 .btn-secondary {
   background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
   border-radius: var(--radius); font-weight: 600; font-size: 13px; padding: 9px 14px;
 }
 .btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
+
+/* API access block: endpoint facts + language tabs + code */
+.api-facts { display: grid; gap: 5px; margin-bottom: 12px; }
+.api-facts > div { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.api-facts dt { color: var(--text-dim); font-size: 12px; min-width: 58px; flex-shrink: 0; }
+.api-facts dd { margin: 0; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.api-facts dd code { font-size: 11.5px; }
+.api-verb {
+  font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: 0.4px;
+  background: var(--accent); color: var(--accent-ink); border-radius: 5px; padding: 1px 6px;
+  margin-right: 4px;
+}
+.code-bar { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+.api-mode {
+  margin-left: auto; display: inline-flex; gap: 2px; padding: 2px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+}
+.mode-btn {
+  background: none; border: none; border-radius: 6px; padding: 4px 9px;
+  font-family: inherit; font-size: 11.5px; font-weight: 600;
+  color: var(--text-dim); cursor: pointer; white-space: nowrap;
+}
+.mode-btn:hover { color: var(--text); }
+.mode-btn.active { background: var(--panel-2); color: var(--accent); }
+.code-tabs { display: flex; gap: 4px; }
+.code-tab {
+  background: var(--bg); border: 1px solid var(--border); border-bottom: none;
+  border-radius: 8px 8px 0 0; padding: 6px 12px;
+  font-size: 12px; font-weight: 600; color: var(--text-dim);
+}
+.code-tab:hover { color: var(--text); }
+.code-tab.active { background: var(--panel-2); color: var(--text); box-shadow: inset 0 2px 0 var(--accent); }
+/* ---------- code blocks: a real syntax theme, not monochrome text ----------
+   Token colours come from static/highlight.js; the palette is Tokyo-Night-ish
+   and picked to sit next to the lime accent without competing with it. */
+.code-block {
+  --code-bg: #0a0e14;
+  --code-fg: #c8d3e0;
+  --tok-com: #6b7686; /* comments recede: the one thing allowed under 4.5:1 */
+  --tok-str: #9ece6a;
+  --tok-kw: #bb9af7;
+  --tok-num: #e0af68;
+  --tok-fn: #7aa2f7;
+  --tok-bui: #2ac3de;
+  --tok-prop: #e0af68;
+  --tok-url: #73daca;
+  --tok-tag: #f7768e;
+  --tok-punc: #89929f;
+
+  background: var(--code-bg); border: 1px solid var(--border);
+  border-radius: 0 10px 10px 10px; padding: 12px; margin: 0 0 10px;
+  overflow-x: auto;
+  /* a 43-char API key makes the iframe src wider than the pane; scrolling beats
+     wrapping, which would drop the indentation to column 0 and split tokens
+     like max-height in half. Everything else is reformatted to fit (see
+     EMBED_SNIPPETS), so at most that one line scrolls. */
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.7;
+}
+.code-block code {
+  display: block; background: none; padding: 0;
+  white-space: pre;
+  font-family: inherit; font-size: inherit; line-height: inherit; color: var(--code-fg);
+}
+.tok-com { color: var(--tok-com); font-style: italic; }
+.tok-str { color: var(--tok-str); }
+.tok-kw { color: var(--tok-kw); }
+.tok-num { color: var(--tok-num); }
+.tok-fn { color: var(--tok-fn); }
+.tok-bui { color: var(--tok-bui); }
+.tok-prop { color: var(--tok-prop); }
+.tok-url { color: var(--tok-url); }
+.tok-tag { color: var(--tok-tag); }
+.tok-attr { color: var(--tok-prop); }
+.tok-flag { color: var(--tok-prop); }
+.tok-punc { color: var(--tok-punc); }
+.api-note { font-size: 12px; line-height: 1.55; margin-top: 10px; }
 .btn-small { padding: 9px 14px; font-size: 13px; }
 #key-form { display: flex; gap: 8px; margin-bottom: 10px; }
 #key-label {
@@ -241,6 +389,9 @@ button { font-family: inherit; cursor: pointer; }
 .key-item .key-label { flex: 1; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .key-del { background: none; border: none; color: var(--text-dim); padding: 3px; border-radius: 6px; flex-shrink: 0; }
 .key-del:hover { color: var(--danger); }
+.key-edit { background: none; border: none; color: var(--text-dim); padding: 3px; border-radius: 6px; flex-shrink: 0; }
+.key-edit:hover { color: var(--accent); }
+.key-lock { font-size: 8px; color: var(--accent); flex-shrink: 0; line-height: 1; }
 
 /* ---------- Chat ---------- */
 .chat-main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
@@ -259,6 +410,30 @@ button { font-family: inherit; cursor: pointer; }
 .msg-role { font-size: 12px; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 4px; }
 .msg-text { white-space: pre-wrap; word-break: break-word; }
 .msg-text a { color: var(--accent); }
+/* block-level markdown from the answer renderer. Blocks are concatenated with
+   no whitespace between them, so pre-wrap above only affects text inside a
+   block — otherwise every paragraph gap would double. */
+.msg-text p { margin: 0 0 9px; }
+.msg-text > :last-child { margin-bottom: 0; }
+.msg-text h3, .msg-text h4, .msg-text h5, .msg-text h6 {
+  margin: 15px 0 7px; line-height: 1.35; font-weight: 800;
+}
+.msg-text h3 { font-size: 16px; }
+.msg-text h4 { font-size: 14.5px; }
+.msg-text h5, .msg-text h6 { font-size: 13.5px; color: var(--text-dim); }
+.msg-text > h3:first-child, .msg-text > h4:first-child { margin-top: 0; }
+.msg-text ul, .msg-text ol { margin: 0 0 9px; padding-left: 21px; }
+.msg-text li { margin: 2px 0; }
+.msg-text li::marker { color: var(--text-dim); }
+.msg-text table {
+  border-collapse: collapse; width: 100%; margin: 6px 0 11px;
+  font-size: 13px; white-space: normal; table-layout: auto;
+}
+.msg-text th, .msg-text td {
+  border: 1px solid var(--border); padding: 5px 9px;
+  text-align: left; vertical-align: top;
+}
+.msg-text th { background: var(--panel-2); font-weight: 700; }
 .msg-text .inline-code {
   font-family: var(--mono); font-size: 0.86em;
   background: var(--panel-2); border: 1px solid var(--border);
@@ -350,6 +525,252 @@ button { font-family: inherit; cursor: pointer; }
 .source-item .src-bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
 .source-item .src-snippet { font-size: 12.5px; color: var(--text-dim); line-height: 1.55; }
 
+/* ---------- Integrate modal ---------- */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px; background: rgba(6, 9, 12, 0.64);
+  backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
+}
+.modal {
+  width: min(620px, 100%); max-height: min(86vh, 900px);
+  display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 16px; box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+  overflow: hidden; /* keep the rail's own background inside the rounded corner */
+  animation: modal-rise 160ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+.modal-backdrop { animation: modal-fade 140ms ease; }
+.modal-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 15px 18px; border-bottom: 1px solid var(--border);
+}
+.modal-head h3 { font-size: 15px; font-weight: 800; }
+.modal-close { margin-left: auto; }
+.modal-body { padding: 18px; overflow-y: auto; }
+/* the integration dialog carries a left rail, so it needs a little more width */
+#int-modal .modal {
+  width: min(760px, 100%);
+  /* a stable height keeps the rail from jumping when you switch tabs; 600px is
+     the target, but it still has to fit short viewports (hence the min()) */
+  min-height: min(600px, calc(100vh - 48px));
+}
+body.modal-open { overflow: hidden; }
+
+/* ---------- per-key customizer ---------- */
+#int-modal.editing .modal { width: min(940px, 100%); }
+.editor-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--border);
+}
+.editor-id { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.editor-id strong { font-size: 14px; font-weight: 700; }
+.editor-id code {
+  font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+}
+.plan-tag {
+  padding: 2px 7px; border-radius: 5px; font-size: 10px; font-weight: 700;
+  letter-spacing: .08em; background: var(--accent); color: #131a08;
+}
+#editor-save { margin-left: auto; }
+.editor-cols { display: grid; grid-template-columns: 1fr 292px; gap: 22px; align-items: start; }
+
+.ed-sec { margin-bottom: 20px; }
+.ed-sec:last-child { margin-bottom: 0; }
+.ed-sec h4 {
+  font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--text-dim); margin-bottom: 9px;
+}
+.ed-hint { font-size: 12px; color: var(--text-dim); line-height: 1.5; margin-bottom: 8px; }
+
+.ed-row {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 8px; min-height: 30px;
+}
+.ed-row > span:first-child { flex: none; width: 130px; font-size: 12.5px; color: var(--text-dim); }
+.ed-row input[type="text"], .ed-row input[type="url"], .ed-row input[type="number"],
+.ed-row textarea {
+  flex: 1; min-width: 0; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px;
+  font-family: inherit; font-size: 12.5px; line-height: 1.45;
+}
+.ed-row textarea { resize: vertical; }
+.ed-row input:focus, .ed-row textarea:focus { border-color: var(--accent); outline: none; }
+.ed-row input::placeholder, .ed-row textarea::placeholder { color: var(--text-dim); opacity: .7; }
+#ed-origins {
+  width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; font-family: var(--mono); font-size: 12px;
+  resize: vertical; line-height: 1.5;
+}
+#ed-origins:focus { border-color: var(--accent); outline: none; }
+
+.seg {
+  display: inline-flex; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 2px; gap: 2px;
+}
+.seg button {
+  border: 0; background: none; color: var(--text-dim); font-size: 12px; font-weight: 600;
+  padding: 5px 10px; border-radius: 6px; white-space: nowrap;
+}
+.seg button.active { background: var(--panel-2); color: var(--text); }
+.seg button:hover:not(.active) { color: var(--text); }
+
+.swatches { display: flex; align-items: center; gap: 6px; }
+.sw {
+  width: 22px; height: 22px; border-radius: 50%; border: 2px solid transparent;
+  background: var(--s); padding: 0;
+}
+.sw.active { border-color: var(--text); }
+#ed-color {
+  width: 26px; height: 24px; padding: 0; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--bg); cursor: pointer;
+}
+
+.switch-row { justify-content: space-between; }
+/* beat `.ed-row > span:first-child` — the label needs to grow past 130px */
+.ed-row.switch-row > span:first-child { width: auto; flex: 1; min-width: 0; }
+.switch { flex: none; position: relative; display: inline-block; width: 38px; height: 21px; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch i {
+  position: absolute; inset: 0; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 999px; transition: background .15s, border-color .15s;
+}
+.switch i::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 15px; height: 15px;
+  border-radius: 50%; background: var(--text-dim); transition: transform .15s, background .15s;
+}
+.switch input:checked + i { background: var(--accent); border-color: var(--accent); }
+.switch input:checked + i::after { transform: translateX(17px); background: #131a08; }
+.switch input:disabled + i { opacity: .45; }
+
+.pro-hint {
+  font-style: normal; font-size: 9.5px; font-weight: 700; letter-spacing: .06em;
+  padding: 1px 5px; border-radius: 4px; margin-left: 4px;
+  background: var(--panel-2); color: var(--text-dim); border: 1px solid var(--border);
+}
+
+.doc-scope {
+  max-height: 132px; overflow-y: auto; border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px; margin-bottom: 10px; background: var(--bg);
+}
+.doc-scope label {
+  display: flex; align-items: center; gap: 7px; padding: 4px 5px;
+  font-size: 12px; border-radius: 5px; cursor: pointer;
+}
+.doc-scope label:hover { background: var(--panel-2); }
+.doc-scope input { accent-color: var(--accent); }
+.doc-scope .empty { font-size: 12px; color: var(--text-dim); padding: 6px; }
+/* list header: live count on the left, select-all / invert on the right */
+.doc-scope-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; margin-bottom: 5px;
+}
+.doc-count {
+  font-size: 11.5px; color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.doc-tools { display: flex; gap: 2px; }
+.doc-tool {
+  background: none; border: none; border-radius: 6px; padding: 2px 7px;
+  font-family: inherit; font-size: 11.5px; font-weight: 600;
+  color: var(--text-dim); cursor: pointer; white-space: nowrap;
+}
+.doc-tool:hover:not([aria-disabled="true"]) { background: var(--panel-2); color: var(--text); }
+/* .35 made a disabled "Select all" look like it had failed to render */
+.doc-tool[aria-disabled="true"] { opacity: .45; cursor: default; }
+
+.usage-strip {
+  display: flex; gap: 14px; font-size: 11.5px; color: var(--text-dim);
+  padding-top: 8px; border-top: 1px dashed var(--border);
+}
+.usage-strip b { color: var(--text); font-weight: 700; }
+
+/* preview pane */
+.editor-preview { position: sticky; top: 0; }
+.pv-label {
+  font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--text-dim); margin-bottom: 8px;
+}
+.pv {
+  --pv-bg: #0d1217; --pv-panel: #141a21; --pv-border: #232c37;
+  --pv-text: #e4e9ef; --pv-dim: #93a0ae; --pv-accent: #c6f24e;
+  background: var(--pv-bg); color: var(--pv-text);
+  border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
+  display: flex; flex-direction: column; height: 300px;
+}
+.pv[data-theme="light"] {
+  --pv-bg: #ffffff; --pv-panel: #f7f8fb; --pv-border: #e2e7ee;
+  --pv-text: #16202b; --pv-dim: #5f6b7a;
+}
+.pv-head {
+  display: flex; align-items: center; gap: 7px; padding: 10px 11px;
+  background: var(--pv-panel); border-bottom: 1px solid var(--pv-border);
+}
+.pv-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--pv-accent); flex: none; }
+.pv-title {
+  font-size: 12px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pv-sub {
+  font-size: 10px; color: var(--pv-dim); margin-left: auto; flex: none;
+  max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pv-msgs { flex: 1; padding: 11px; overflow: hidden; }
+.pv-bot {
+  font-size: 11.5px; line-height: 1.5; padding: 8px 10px;
+  background: var(--pv-panel); border: 1px solid var(--pv-border); border-radius: 10px;
+  border-bottom-left-radius: 3px; max-width: 92%;
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+}
+.pv-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+.pv-chips span {
+  font-size: 9.5px; padding: 2px 7px; border-radius: 999px;
+  border: 1px solid var(--pv-border); color: var(--pv-dim);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pv-composer {
+  display: flex; align-items: center; gap: 7px; padding: 9px 11px;
+  background: var(--pv-panel); border-top: 1px solid var(--pv-border);
+}
+.pv-ph {
+  flex: 1; font-size: 10.5px; color: var(--pv-dim); padding: 6px 8px;
+  border: 1px solid var(--pv-border); border-radius: 7px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pv-send {
+  width: 26px; height: 26px; border-radius: 7px; flex: none;
+  display: grid; place-items: center; font-size: 12px; font-weight: 800;
+  background: var(--pv-accent); color: #131a08;
+}
+.pv-brand {
+  text-align: center; font-size: 9px; color: var(--pv-dim); opacity: .75;
+  padding-bottom: 5px; background: var(--pv-panel);
+}
+.pv-launcher-row {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: 12px; font-size: 11.5px; color: var(--text-dim);
+}
+.pv-launcher {
+  width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--pv-accent, #c6f24e); color: #131a08; font-size: 15px; font-weight: 800;
+  transition: transform .15s;
+}
+.pv-launcher.left { align-self: flex-start; }
+.pv-launcher svg { width: 18px; height: 18px; }
+
+@media (max-width: 820px) {
+  .editor-cols { grid-template-columns: 1fr; }
+  .editor-preview { position: static; order: -1; }
+  .ed-row > span:first-child { width: 108px; }
+}
+
+@keyframes modal-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modal-rise {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .modal-backdrop, .modal { animation: none; }
+}
+
 /* ---------- Mobile ---------- */
 .sidebar-backdrop { display: none; }
 @media (max-width: 900px) {
@@ -369,4 +790,19 @@ button { font-family: inherit; cursor: pointer; }
   .messages { padding: 18px 14px; }
   .composer-wrap { padding: 10px 12px 12px; }
   .send-btn, .icon-btn { min-width: 44px; min-height: 44px; }
+  .modal-backdrop { padding: 12px; }
+  .modal { max-height: 88vh; }
+}
+
+@media (max-width: 520px) {
+  .modal-backdrop { padding: 8px; }
+  .modal { max-height: 92vh; border-radius: 14px; }
+  .modal-head { padding: 13px 14px; }
+  .modal-body { padding: 14px; }
+  #key-form { flex-wrap: wrap; }
+  #key-form .btn-small { width: 100%; }
+  /* stack label above value so the endpoint URL gets the full width */
+  .api-facts > div { flex-direction: column; align-items: flex-start; gap: 1px; }
+  .api-facts dt { min-width: 0; }
+  .api-facts dd { white-space: normal; word-break: break-all; max-width: 100%; }
 }

@@ -97,6 +97,36 @@ embedding API are unaffected (the provider owns the model).
 keeping `[1]` citation markers intact; demo-mode fallbacks are bilingual; SSE streams
 Chinese in small slices so it types out visibly instead of appearing in one dump.
 
+## Large knowledge bases
+
+Six passages are the right amount of context for *"how long is the refund window"* and the
+wrong amount for *"which people are in here"*. On a hundred-document base the old path
+returned the six closest documents and the model reported them as the complete list — it
+answered "the knowledge base contains 6 people" with a straight face.
+
+Questions that sweep the collection are now detected before retrieval:
+
+- **Listing intent** — `有哪些` / `列出` / `all` / `which` / `how many` … widens the net to
+  `RAGBASE_LIST_TOP_K` (20) passages and allows **at most one chunk per document**, so 20
+  slots cover 20 documents instead of 7.
+- **A name in the question keeps it narrow.** "周星驰演过哪些电影" matches a filename, so it
+  stays a single-document lookup instead of dragging the whole base into the prompt.
+- **Corpus inventory** — the prompt also receives one line per document (filename plus the
+  opening 60 characters, which usually states the category). That is what makes an exact
+  "how many" and a complete list possible. Capped by `RAGBASE_INVENTORY_DOCS` and
+  `RAGBASE_CONTEXT_CHARS`, so a ten-thousand-document base cannot blow up the prompt.
+
+Measured on the 100 generated celebrity profiles in `test-pdf/` (one chunk each):
+
+| Question | Before | After |
+|---|---|---|
+| 这个知识库里有哪些明星？ | 「知识库中收录了以下 6 位明星」 + 6 names | all 100, grouped by category |
+| 有哪些女歌手 | 6 of 13 | all 13 |
+| 周星驰演过哪些电影？（single lookup） | correct | unchanged, 100% recall@6 |
+
+Single-name lookups were 92% top-1 / 100% recall@6 both before and after, so the widening
+does not trade precision for coverage.
+
 ## Works with any OpenAI-compatible LLM
 
 | Provider | Chat | Embeddings |
@@ -112,7 +142,7 @@ Everything else is automatic.
 
 ## Embed it in any website
 
-Create an API key in the **Integrate** tab, then drop one snippet into the customer's page:
+Create an API key in the **Embed & API** tab, then drop one snippet into the customer's page:
 
 ```html
 <iframe src="https://your-host/widget?key=rbk_..." style="position:fixed;bottom:20px;right:20px;width:380px;height:600px;border:none;z-index:9999;border-radius:16px;box-shadow:0 8px 30px rgba(0,0,0,.35);" title="Knowledge base chat"></iframe>
@@ -127,10 +157,88 @@ curl -X POST https://your-host/api/widget/chat \
 # → {"conversation_id": "...", "answer": "...", "sources": [...]}
 ```
 
+Add `"stream": true` to the same endpoint to get the SSE stream the app itself uses —
+one `data: {"delta": "…"}` frame per token, then a final
+`data: {"done": true, "conversation_id": "...", "sources": [...]}`:
+
+```bash
+curl -N -X POST https://your-host/api/widget/chat \
+  -H "X-API-Key: rbk_..." -H "Content-Type: application/json" \
+  -d '{"message": "What is the refund policy?", "stream": true}'
+```
+
+For developers who would rather not maintain iframe markup, the same thing in one line:
+
+```html
+<script src="https://your-host/sdk.js" data-key="rbk_..." data-lang="zh"></script>
+```
+
+The SDK renders inside a shadow root (the host page's CSS cannot leak in), pulls the key's
+configuration, and exposes `RAGbase.open()`, `RAGbase.close()` and `RAGbase.toggle()`.
+Preview any key's look at `/demo?key=rbk_...`.
+
 API keys are scoped to one knowledge base and can only chat — they cannot manage documents
-or users. Revoke anytime from the **Integrate** tab. The widget page
-(`app/static/widget.html`) is self-contained, so title, greeting and colors are easy to
-rebrand per customer.
+or users. Revoke anytime from the **Embed & API** tab.
+
+### Per-key customization
+
+Each key carries its own branding, behaviour, scope and security policy, so one instance can
+serve several customers without showing them each other's look or data. Edit it from the
+pencil icon in the dashboard, or drive it from the API:
+
+```bash
+curl -X PATCH https://your-host/api/api-keys/KEY_ID \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{
+    "allowed_origins": ["customer.com", "*.customer.com"],
+    "config": {
+      "branding": {"theme": "light", "primaryColor": "#4f8cff", "title": "Acme Help",
+                   "position": "left", "hideBranding": true},
+      "behavior": {"autoOpen": "delay", "autoOpenDelay": 8,
+                   "starterQuestions": ["Pricing?", "Refunds?"],
+                   "fallbackMessage": "Please contact support@acme.com."},
+      "content":  {"docIds": [], "quotaPerMin": 30, "quotaPerDay": 2000}
+    }
+  }'
+```
+
+`PATCH` deep-merges: send only the fields that change.
+
+| Group | Options |
+|---|---|
+| `branding` | `theme` auto/light/dark · `primaryColor` (#rgb or #rrggbb) · `title` · `subtitle` · `greeting` · `placeholder` · `position` right/left · `icon` chat/spark/logo + `logoUrl` · `hideBranding` (Pro) |
+| `behavior` | `autoOpen` never/delay/always + `autoOpenDelay` · `starterQuestions` (max 4) · `showSources` · `persistSession` · `fallbackMessage` |
+| `content` | `docIds` (empty = entire knowledge base) · `quotaPerMin` · `quotaPerDay` (0 = unlimited) |
+
+Every value is rebuilt from an allow-list before it is stored: colours must be hex, enums fall
+back to their default, text is trimmed and length-capped, URLs must be http(s). A malformed
+config degrades to the default instead of breaking the embed or opening an injection path.
+
+### Security: the key is public, the domain list is not
+
+An embed key is printed in the customer's HTML, so it cannot be treated as a secret. Two
+mechanisms take its place:
+
+- **`allowed_origins`** — the key only answers approved domains. Browser calls get a 403
+  without a CORS grant, and `/widget` returns `Content-Security-Policy: frame-ancestors …`, so
+  browsers refuse to render the widget on any other site. Server-to-server calls (no `Origin`
+  header) still pass: holding the key is what authorises those.
+- **Quota** — `quotaPerMin` / `quotaPerDay` cap a runaway client; a 429 comes back with
+  `Retry-After`. Counters live in process memory and reset on restart.
+
+An empty `allowed_origins` keeps the permissive behaviour of earlier versions — set it before
+handing a key to a third party.
+
+### White label is a paid capability
+
+`hideBranding` only takes effect on a key whose plan is `pro`; on `free` it is silently ignored
+and automatically restored if the key is upgraded again. Only an admin can move a key to `pro`:
+
+```bash
+curl -X PATCH https://your-host/api/admin/api-keys/KEY_ID/plan \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"plan": "pro"}'
+```
 
 ![Embed in your website](docs/hero_2_integration.png)
 
@@ -150,6 +258,9 @@ All settings live in `.env` (see [.env.example](.env.example)):
 | `RAGBASE_MAX_UPLOAD_MB` | `25` | Upload size limit per file |
 | `RAGBASE_CHUNK_SIZE` / `RAGBASE_CHUNK_OVERLAP` | `900` / `150` | Chunking parameters |
 | `RAGBASE_TOP_K` | `6` | Retrieved passages per question |
+| `RAGBASE_LIST_TOP_K` | `20` | Passages for a corpus-wide question; `0` disables widening and the inventory |
+| `RAGBASE_INVENTORY_DOCS` | `200` | Documents listed in the prompt's corpus inventory |
+| `RAGBASE_CONTEXT_CHARS` | `24000` | Retrieved characters per answer, inventory included |
 | `RAGBASE_DATA_DIR` | `data` | SQLite database location |
 
 ## Docker — one command

@@ -81,34 +81,6 @@
         <div class="conv-list" id="conv-list"></div>
       </div>
 
-      <div class="side-pane hidden" id="pane-int">
-        <div class="int-head">
-          <button class="icon-btn int-back" id="int-back" data-i18n-title="int.back">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 3L5 8l5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
-          <h3 data-i18n="int.title">Integration &amp; API</h3>
-        </div>
-        <div class="int-section">
-          <h3 data-i18n="int.embed.title">Embed in your website</h3>
-          <p class="dim" data-i18n="int.embed.desc">Paste this snippet into any page — a chat window connected to your knowledge base appears in the corner.</p>
-          <textarea id="embed-code" readonly rows="7" data-i18n-title="int.embed.title"></textarea>
-          <button class="btn-secondary" id="copy-embed" type="button" data-i18n="int.embed.copy">Copy snippet</button>
-        </div>
-        <div class="int-section">
-          <h3 data-i18n="int.keys.title">API keys</h3>
-          <p class="dim" data-i18n="int.keys.desc">Used by the embed and server-to-server integrations. A key can only chat — it cannot manage documents or users.</p>
-          <form id="key-form">
-            <input type="text" id="key-label" data-i18n-ph="int.keys.labelPh" data-i18n-title="int.keys.labelPh" placeholder="Label (e.g. company site)" />
-            <button type="submit" class="btn-primary btn-small" data-i18n="int.keys.create">Create key</button>
-          </form>
-          <div id="new-key-box" class="new-key-box hidden">
-            <p><strong data-i18n="int.keys.once">Copy it now — it won't be shown again:</strong></p>
-            <code id="new-key-value"></code>
-          </div>
-          <div class="key-list" id="key-list"></div>
-        </div>
-      </div>
-
       <div class="side-pane hidden" id="pane-kb">
         <div id="drop-zone" class="drop-zone" tabindex="0" role="button" data-i18n-title="kb.uploadAria">
           <svg width="26" height="26" viewBox="0 0 24 24" fill="none"><path d="M12 16V4m0 0l-4 4m4-4l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
@@ -116,6 +88,7 @@
           <p class="dim" data-i18n="kb.dropHint">or click to browse · PDF, DOCX, TXT, MD, HTML</p>
           <input type="file" id="file-input" multiple accept=".pdf,.docx,.txt,.md,.markdown,.html,.htm" hidden />
         </div>
+        <div class="doc-count" id="doc-count" hidden></div>
         <div class="doc-list" id="doc-list"></div>
       </div>
 
@@ -155,9 +128,281 @@
       </div>
     </aside>
   </div>
+
+  <!-- ============ Integration modal ============ -->
+  <div class="modal-backdrop hidden" id="int-modal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="int-modal-title">
+      <div class="modal-head">
+        <h3 id="int-modal-title" data-i18n="int.title">Integration &amp; API</h3>
+        <button class="icon-btn modal-close" id="int-close" type="button" data-i18n-title="int.close">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="modal-body int-layout" id="int-main">
+        <!-- the three section titles live in a left rail; one pane shows at a time -->
+        <div class="int-nav" role="tablist" aria-orientation="vertical" data-i18n-title="int.navAria">
+          <button class="int-tab active" id="int-tab-embed" type="button" role="tab"
+                  aria-selected="true" aria-controls="int-pane-embed" data-int-tab="embed">
+            <span class="int-dot"></span><span data-i18n="int.tab.embed">Embed</span>
+          </button>
+          <button class="int-tab" id="int-tab-api" type="button" role="tab" tabindex="-1"
+                  aria-selected="false" aria-controls="int-pane-api" data-int-tab="api">
+            <span class="int-dot"></span><span data-i18n="int.tab.api">API</span>
+          </button>
+          <button class="int-tab" id="int-tab-keys" type="button" role="tab" tabindex="-1"
+                  aria-selected="false" aria-controls="int-pane-keys" data-int-tab="keys">
+            <span class="int-dot"></span><span data-i18n="int.tab.keys">API keys</span>
+          </button>
+        </div>
+
+        <div class="int-panes">
+          <section class="int-pane active" id="int-pane-embed" role="tabpanel"
+                   aria-labelledby="int-tab-embed" tabindex="0">
+            <div class="int-lead">
+              <p class="dim" data-i18n="int.embed.desc">Paste this snippet into any page — a chat window connected to your knowledge base appears in the corner.</p>
+              <button class="demo-btn" id="open-widget-demo" type="button" data-i18n-title="int.embed.demoTitle">
+                <span data-i18n="int.embed.demo">Open demo</span>
+                <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M3.5 8.5l5-5M4.5 3.5h4v4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+            </div>
+            <div class="code-bar">
+              <div class="code-tabs" role="tablist">
+                <button class="code-tab active" type="button" data-embed-tab="iframe">iframe</button>
+                <button class="code-tab" type="button" data-embed-tab="sdk">&lt;script&gt;</button>
+              </div>
+            </div>
+            <pre class="code-block code-block--embed"><code id="embed-code"></code></pre>
+            <button class="btn-secondary" id="copy-embed" type="button" data-i18n="int.embed.copy">Copy snippet</button>
+          </section>
+
+          <section class="int-pane" id="int-pane-api" role="tabpanel"
+                   aria-labelledby="int-tab-api" tabindex="0">
+            <p class="dim" data-i18n="int.api.desc">Call your knowledge base from your own backend.</p>
+            <dl class="api-facts">
+              <div>
+                <dt data-i18n="int.api.endpoint">Endpoint</dt>
+                <dd><span class="api-verb">POST</span> <code id="api-endpoint"></code></dd>
+              </div>
+              <div>
+                <dt data-i18n="int.api.header">Header</dt>
+                <dd><code>X-API-Key: <span id="api-key-hint">YOUR_API_KEY</span></code></dd>
+              </div>
+            </dl>
+            <div class="code-bar">
+              <div class="code-tabs" role="tablist">
+                <button class="code-tab active" role="tab" data-api-tab="curl" data-i18n="int.api.tabCurl">cURL</button>
+                <button class="code-tab" role="tab" data-api-tab="python" data-i18n="int.api.tabPython">Python</button>
+                <button class="code-tab" role="tab" data-api-tab="node" data-i18n="int.api.tabNode">Node.js</button>
+              </div>
+              <div class="api-mode" role="group" data-i18n-title="int.api.modeAria" aria-label="Response mode">
+                <button class="mode-btn active" type="button" data-api-mode="json" data-i18n="int.api.modeJson">Full response</button>
+                <button class="mode-btn" type="button" data-api-mode="stream" data-i18n="int.api.modeStream">Streaming</button>
+              </div>
+            </div>
+            <pre class="code-block"><code id="api-snippet"></code></pre>
+            <button class="btn-secondary" id="copy-api" type="button" data-i18n="int.api.copy">Copy</button>
+            <p class="dim api-note" id="api-note" data-i18n="int.api.note">Multi-turn: pass conversation_id back.</p>
+          </section>
+
+          <section class="int-pane" id="int-pane-keys" role="tabpanel"
+                   aria-labelledby="int-tab-keys" tabindex="0">
+            <p class="dim" data-i18n="int.keys.desc">Used by the embed and server-to-server integrations. A key can only chat — it cannot manage documents or users.</p>
+            <form id="key-form">
+              <input type="text" id="key-label" data-i18n-ph="int.keys.labelPh" data-i18n-title="int.keys.labelPh" placeholder="Label (e.g. company site)" />
+              <button type="submit" class="btn-primary btn-small" data-i18n="int.keys.create">Create key</button>
+            </form>
+            <div id="new-key-box" class="new-key-box hidden">
+              <p><strong data-i18n="int.keys.once">Copy it now — it won't be shown again:</strong></p>
+              <code id="new-key-value"></code>
+            </div>
+            <div class="key-list" id="key-list"></div>
+          </section>
+        </div>
+      </div>
+
+      <!-- ---------- per-key customizer ---------- -->
+      <div class="modal-body hidden" id="int-editor">
+        <div class="editor-bar">
+          <button class="icon-btn" id="editor-back" type="button" data-i18n-title="key.back">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 3L5 8l5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <div class="editor-id">
+            <strong data-i18n="key.editTitle">Customize widget</strong>
+            <code id="editor-prefix"></code>
+          </div>
+          <span class="plan-tag hidden" id="editor-plan">PRO</span>
+          <button class="btn-primary btn-small" id="editor-save" type="button" data-i18n="key.save">Save</button>
+        </div>
+
+        <div class="editor-cols">
+          <div class="editor-form">
+
+            <section class="ed-sec">
+              <h4 data-i18n="key.secBranding">Branding</h4>
+
+              <div class="ed-row">
+                <span data-i18n="key.theme">Theme</span>
+                <div class="seg" data-seg="branding.theme">
+                  <button type="button" data-v="auto" data-i18n="key.themeAuto">Auto</button>
+                  <button type="button" data-v="light" data-i18n="key.themeLight">Light</button>
+                  <button type="button" data-v="dark" data-i18n="key.themeDark">Dark</button>
+                </div>
+              </div>
+
+              <div class="ed-row">
+                <span data-i18n="key.accent">Accent colour</span>
+                <div class="swatches">
+                  <button type="button" class="sw" data-color="#c6f24e" style="--s:#c6f24e"></button>
+                  <button type="button" class="sw" data-color="#4f8cff" style="--s:#4f8cff"></button>
+                  <button type="button" class="sw" data-color="#1f9d76" style="--s:#1f9d76"></button>
+                  <button type="button" class="sw" data-color="#e2683c" style="--s:#e2683c"></button>
+                  <button type="button" class="sw" data-color="#9b5de5" style="--s:#9b5de5"></button>
+                  <input type="color" id="ed-color" value="#c6f24e" data-i18n-title="key.accent" />
+                </div>
+              </div>
+
+              <label class="ed-row">
+                <span data-i18n="key.title">Header title</span>
+                <input type="text" data-cfg="branding.title" maxlength="60" data-i18n-ph="key.phTitle" placeholder="Ask us anything" />
+              </label>
+              <label class="ed-row">
+                <span data-i18n="key.subtitle">Header subtitle</span>
+                <input type="text" data-cfg="branding.subtitle" maxlength="80" data-i18n-ph="key.phSubtitle" placeholder="answers from our docs" />
+              </label>
+              <label class="ed-row">
+                <span data-i18n="key.greeting">Greeting</span>
+                <textarea rows="2" data-cfg="branding.greeting" maxlength="300" data-i18n-ph="key.phGreeting" placeholder="Hi! Ask me anything…"></textarea>
+              </label>
+              <label class="ed-row">
+                <span data-i18n="key.placeholder">Input placeholder</span>
+                <input type="text" data-cfg="branding.placeholder" maxlength="60" data-i18n-ph="key.phPlaceholder" placeholder="Type your question…" />
+              </label>
+
+              <div class="ed-row">
+                <span data-i18n="key.position">Launcher corner</span>
+                <div class="seg" data-seg="branding.position">
+                  <button type="button" data-v="right" data-i18n="key.posRight">Bottom right</button>
+                  <button type="button" data-v="left" data-i18n="key.posLeft">Bottom left</button>
+                </div>
+              </div>
+
+              <div class="ed-row">
+                <span data-i18n="key.icon">Launcher icon</span>
+                <div class="seg" data-seg="branding.icon">
+                  <button type="button" data-v="chat" data-i18n="key.iconChat">Chat</button>
+                  <button type="button" data-v="spark" data-i18n="key.iconSpark">Spark</button>
+                  <button type="button" data-v="logo" data-i18n="key.iconLogo">Logo</button>
+                </div>
+              </div>
+              <label class="ed-row hidden" id="row-logo">
+                <span data-i18n="key.logoUrl">Logo URL</span>
+                <input type="url" data-cfg="branding.logoUrl" maxlength="480" placeholder="https://cdn.example.com/logo.png" />
+              </label>
+
+              <div class="ed-row switch-row">
+                <span><span data-i18n="key.hideBranding">Hide “Powered by”</span>
+                  <em class="pro-hint" data-i18n="key.proOnly">Pro</em>
+                </span>
+                <label class="switch"><input type="checkbox" id="ed-branding-hide" /><i></i></label>
+              </div>
+            </section>
+
+            <section class="ed-sec">
+              <h4 data-i18n="key.secBehavior">Behaviour</h4>
+
+              <div class="ed-row">
+                <span data-i18n="key.autoOpen">Auto-open</span>
+                <div class="seg" data-seg="behavior.autoOpen">
+                  <button type="button" data-v="never" data-i18n="key.autoNever">Never</button>
+                  <button type="button" data-v="delay" data-i18n="key.autoDelay">After delay</button>
+                  <button type="button" data-v="always" data-i18n="key.autoAlways">On load</button>
+                </div>
+              </div>
+              <label class="ed-row hidden" id="row-delay">
+                <span data-i18n="key.delaySeconds">Delay (seconds)</span>
+                <input type="number" min="0" max="60" data-cfg="behavior.autoOpenDelay" />
+              </label>
+
+              <label class="ed-row">
+                <span data-i18n="key.starters">Starter questions</span>
+                <textarea rows="3" data-cfg-lines="behavior.starterQuestions" data-i18n-ph="key.phStarters" placeholder="One per line, up to 4"></textarea>
+              </label>
+
+              <div class="ed-row switch-row">
+                <span data-i18n="key.showSources">Show cited sources</span>
+                <label class="switch"><input type="checkbox" data-cfg="behavior.showSources" /><i></i></label>
+              </div>
+              <div class="ed-row switch-row">
+                <span data-i18n="key.persist">Keep the conversation across reloads</span>
+                <label class="switch"><input type="checkbox" data-cfg="behavior.persistSession" /><i></i></label>
+              </div>
+              <label class="ed-row">
+                <span data-i18n="key.fallback">“Nothing found” reply</span>
+                <textarea rows="2" data-cfg="behavior.fallbackMessage" maxlength="300" data-i18n-ph="key.phFallback" placeholder="Leave empty to let the model answer"></textarea>
+              </label>
+            </section>
+
+            <section class="ed-sec">
+              <h4 data-i18n="key.secScope">Scope &amp; limits</h4>
+              <p class="ed-hint" data-i18n="key.docsHint">Only these documents can be retrieved. Leave all unchecked to expose the whole knowledge base.</p>
+              <div class="doc-scope-head" id="ed-doc-head">
+                <span class="doc-count" id="ed-doc-count"></span>
+                <div class="doc-tools">
+                  <button type="button" class="doc-tool" id="ed-docs-all" data-i18n="key.docsAll">Select all</button>
+                  <button type="button" class="doc-tool" id="ed-docs-invert" data-i18n="key.docsInvert">Invert</button>
+                </div>
+              </div>
+              <div class="doc-scope" id="ed-docs"></div>
+              <div class="ed-row">
+                <span data-i18n="key.quotaMin">Requests / minute</span>
+                <input type="number" min="0" max="100000" data-cfg="content.quotaPerMin" />
+              </div>
+              <div class="ed-row">
+                <span data-i18n="key.quotaDay">Requests / day</span>
+                <input type="number" min="0" max="10000000" data-cfg="content.quotaPerDay" />
+              </div>
+              <p class="ed-hint" data-i18n="key.quotaHint">0 means unlimited.</p>
+              <div class="usage-strip" id="ed-usage"></div>
+            </section>
+
+            <section class="ed-sec">
+              <h4 data-i18n="key.secSecurity">Security</h4>
+              <p class="ed-hint" data-i18n="key.originsHint">One domain per line. While empty, any site that has the key can embed the widget. Supports *.example.com.</p>
+              <textarea id="ed-origins" rows="3" placeholder="customer.com&#10;*.customer.com"></textarea>
+            </section>
+          </div>
+
+          <aside class="editor-preview">
+            <p class="pv-label" data-i18n="key.preview">Live preview</p>
+            <div class="pv" id="pv">
+              <div class="pv-head">
+                <span class="pv-dot"></span>
+                <span class="pv-title" id="pv-title">Ask us anything</span>
+                <span class="pv-sub" id="pv-sub">answers from our docs</span>
+              </div>
+              <div class="pv-msgs">
+                <div class="pv-bot" id="pv-greeting">Hi! Ask me anything.</div>
+                <div class="pv-chips hidden" id="pv-chips"></div>
+              </div>
+              <div class="pv-composer">
+                <span class="pv-ph" id="pv-ph">Type your question…</span>
+                <span class="pv-send">↑</span>
+              </div>
+              <div class="pv-brand" id="pv-brand">Powered by RAGbase</div>
+            </div>
+            <div class="pv-launcher-row">
+              <span data-i18n="key.launcher">Launcher</span>
+              <div class="pv-launcher" id="pv-launcher">…</div>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script src="/static/i18n.js"></script>
+<script src="/static/highlight.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

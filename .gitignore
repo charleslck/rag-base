@@ -18,6 +18,14 @@ venv/
 .env.*
 !.env.example
 
+# Runtime state — the SQLite database holds real users, password hashes and
+# conversations. It is created on first boot, never committed.
+data/
+
+# Local test corpus — 100 sample PDFs used to exercise large knowledge bases.
+# Generated locally, not part of the repo.
+test-pdf/
+
 # Editor
 .vscode/
 .idea/

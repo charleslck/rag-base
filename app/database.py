@@ -91,6 +91,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             prefix TEXT NOT NULL,
             key_hash TEXT UNIQUE NOT NULL,
             label TEXT,
+            config TEXT NOT NULL DEFAULT '{}',
+            allowed_origins TEXT NOT NULL DEFAULT '',
+            plan TEXT NOT NULL DEFAULT 'free',
             created_at REAL NOT NULL
         );
         CREATE TABLE IF NOT EXISTS meta (
@@ -99,7 +102,20 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    _migrate(conn)
     conn.commit()
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after the first release (SQLite has no IF NOT EXISTS)."""
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(api_keys)")}
+    for column, ddl in (
+        ("config", "TEXT NOT NULL DEFAULT '{}'"),
+        ("allowed_origins", "TEXT NOT NULL DEFAULT ''"),
+        ("plan", "TEXT NOT NULL DEFAULT 'free'"),
+    ):
+        if column not in have:
+            conn.execute(f"ALTER TABLE api_keys ADD COLUMN {column} {ddl}")
 
 
 def init_db() -> None:
@@ -222,6 +238,32 @@ def get_document(doc_id: str, user_id: str):
     return dict(row) if row else None
 
 
+def document_digests(user_id: str, doc_ids=None, limit: int = 200):
+    """(filename, opening text) for each ready document, oldest filename first.
+
+    Used to give the model a one-line-per-document index of the whole knowledge
+    base: filename alone is not enough to answer "which singers are in here",
+    while the first few dozen characters of the first chunk usually name the
+    category. Returns (rows, total) where total counts past `limit`.
+    """
+    where = " FROM documents d WHERE d.user_id = ? AND d.status = 'ready'"
+    params: list = [user_id]
+    if doc_ids:
+        where += f" AND d.id IN ({','.join('?' * len(doc_ids))})"
+        params.extend(doc_ids)
+    # count first, without the per-row chunk lookup: wrapping the full select
+    # in COUNT(*) would make SQLite open a chunk scan for every document
+    total = get_conn().execute("SELECT COUNT(*) c" + where, params).fetchone()["c"]
+    sql = (
+        "SELECT d.filename AS filename, "
+        "(SELECT c.content FROM chunks c WHERE c.doc_id = d.id ORDER BY c.idx LIMIT 1) AS head"
+        + where
+        + " ORDER BY d.filename LIMIT ?"
+    )
+    rows = get_conn().execute(sql, params + [limit]).fetchall()
+    return [dict(r) for r in rows], int(total)
+
+
 def finish_document(doc_id: str, num_chunks: int, error: str | None = None) -> None:
     get_conn().execute(
         "UPDATE documents SET status = ?, num_chunks = ?, error = ? WHERE id = ?",
@@ -248,13 +290,23 @@ def delete_document(doc_id: str, user_id: str) -> bool:
     return cur.rowcount > 0
 
 
-def all_chunk_vectors(user_id: str):
-    """Return (chunk_rows, matrix) for cosine search."""
-    rows = get_conn().execute(
+def all_chunk_vectors(user_id: str, doc_ids=None):
+    """Return (chunk_rows, matrix) for cosine search.
+
+    The ORDER BY matters: the BM25 index is built in the same order, and RRF
+    fuses the two score vectors positionally — a different row order here would
+    silently pair each chunk's dense score with another chunk's lexical score.
+    """
+    sql = (
         "SELECT c.id, c.doc_id, c.idx, c.content, e.vector FROM chunks c "
-        "JOIN embeddings e ON e.chunk_id = c.id WHERE c.user_id = ?",
-        (user_id,),
-    ).fetchall()
+        "JOIN embeddings e ON e.chunk_id = c.id WHERE c.user_id = ?"
+    )
+    params: list = [user_id]
+    if doc_ids:
+        sql += f" AND c.doc_id IN ({','.join('?' * len(doc_ids))})"
+        params.extend(doc_ids)
+    sql += " ORDER BY c.doc_id, c.idx"
+    rows = get_conn().execute(sql, params).fetchall()
     if not rows:
         return [], np.zeros((0, settings.embedding_dim), dtype=np.float32)
     vecs = np.stack([blob_to_vec(r["vector"]) for r in rows]).astype(np.float32)
@@ -267,7 +319,8 @@ import hashlib
 import secrets as _secrets
 
 
-def create_api_key(user_id: str, label: str = "") -> tuple[dict, str]:
+def create_api_key(user_id: str, label: str = "", config=None, plan: str = "free",
+                   allowed_origins: str = "") -> tuple[dict, str]:
     """Returns (record, full_key). The full key is shown only once."""
     full = "rbk_" + _secrets.token_hex(24)
     record = {
@@ -276,23 +329,69 @@ def create_api_key(user_id: str, label: str = "") -> tuple[dict, str]:
         "prefix": full[:10],
         "key_hash": hashlib.sha256(full.encode()).hexdigest(),
         "label": label[:80],
+        "config": json.dumps(config or {}),
+        "allowed_origins": allowed_origins or "",
+        "plan": plan if plan in ("free", "pro") else "free",
         "created_at": now(),
     }
     conn = get_conn()
     conn.execute(
-        "INSERT INTO api_keys (id, user_id, prefix, key_hash, label, created_at) VALUES (?,?,?,?,?,?)",
-        (record["id"], user_id, record["prefix"], record["key_hash"], record["label"], record["created_at"]),
+        "INSERT INTO api_keys (id, user_id, prefix, key_hash, label, config, allowed_origins, plan, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (record["id"], user_id, record["prefix"], record["key_hash"], record["label"],
+         record["config"], record["allowed_origins"], record["plan"], record["created_at"]),
     )
     conn.commit()
+    record["config"] = json.loads(record["config"])
     return record, full
+
+
+def _key_dict(row) -> dict:
+    d = dict(row)
+    try:
+        d["config"] = json.loads(d.get("config") or "{}")
+    except (TypeError, ValueError):
+        d["config"] = {}
+    return d
 
 
 def list_api_keys(user_id: str):
     rows = get_conn().execute(
-        "SELECT id, prefix, label, created_at FROM api_keys WHERE user_id = ? ORDER BY created_at DESC",
+        "SELECT id, prefix, label, config, allowed_origins, plan, created_at "
+        "FROM api_keys WHERE user_id = ? ORDER BY created_at DESC",
         (user_id,),
     ).fetchall()
-    return [dict(r) for r in rows]
+    return [_key_dict(r) for r in rows]
+
+
+def get_api_key(key_id: str, user_id: str):
+    row = get_conn().execute(
+        "SELECT id, prefix, label, config, allowed_origins, plan, created_at "
+        "FROM api_keys WHERE id = ? AND user_id = ?",
+        (key_id, user_id),
+    ).fetchone()
+    return _key_dict(row) if row else None
+
+
+def update_api_key(key_id: str, user_id: str, fields: dict) -> bool:
+    """Patch a key. Only the fields an integrator may own are writable."""
+    allowed = ("label", "config", "allowed_origins", "plan")
+    sets, values = [], []
+    for name in allowed:
+        if name not in fields:
+            continue
+        value = fields[name]
+        if name == "config":
+            value = json.dumps(value if isinstance(value, dict) else {})
+        sets.append(f"{name} = ?")
+        values.append(value)
+    if not sets:
+        return False
+    values.extend([key_id, user_id])
+    conn = get_conn()
+    cur = conn.execute(f"UPDATE api_keys SET {', '.join(sets)} WHERE id = ? AND user_id = ?", values)
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def revoke_api_key(key_id: str, user_id: str) -> bool:
@@ -302,12 +401,35 @@ def revoke_api_key(key_id: str, user_id: str) -> bool:
     return cur.rowcount > 0
 
 
-def get_user_by_api_key(full_key: str):
+def set_key_plan(key_id: str, plan: str) -> bool:
+    """Admin-only: white-label is a paid capability, so the plan is not
+    something the key owner can grant themselves."""
+    conn = get_conn()
+    cur = conn.execute("UPDATE api_keys SET plan = ? WHERE id = ?", (plan, key_id))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def get_api_key_record(full_key: str):
+    """The key row plus its owner — everything a widget request needs to decide."""
     row = get_conn().execute(
-        "SELECT u.* FROM api_keys k JOIN users u ON u.id = k.user_id WHERE k.key_hash = ?",
+        "SELECT k.id AS id, k.prefix, k.label, k.config, k.allowed_origins, k.plan, "
+        "u.id AS user_id, u.email, u.is_admin "
+        "FROM api_keys k JOIN users u ON u.id = k.user_id WHERE k.key_hash = ?",
         (hashlib.sha256(full_key.encode()).hexdigest(),),
     ).fetchone()
-    return dict(row) if row else None
+    return _key_dict(row) if row else None
+
+
+def get_user_by_api_key(full_key: str):
+    record = get_api_key_record(full_key)
+    if not record:
+        return None
+    return {
+        "id": record["user_id"],
+        "email": record["email"],
+        "is_admin": record["is_admin"],
+    }
 
 
 # ---------------------------------------------------------------- conversations

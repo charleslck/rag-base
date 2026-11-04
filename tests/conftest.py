@@ -56,7 +56,7 @@ os.environ.update(
 
 from starlette.testclient import TestClient  # noqa: E402  (must follow env setup)
 
-from app import bm25, database as db, providers  # noqa: E402
+from app import bm25, database as db, providers, quota  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.main import app as fastapi_app  # noqa: E402
 from helpers import register  # noqa: E402
@@ -84,6 +84,7 @@ def isolated_database():
     bm25._cache.clear()
     providers._openai_client = None
     providers._chat_client = None
+    quota.reset()  # request counters live in memory, not in the database
     yield
 
 

@@ -145,6 +145,33 @@ docker run --rm -v ragbase-data:/data -v "$PWD":/backup alpine \
 - 演示模式的兜底文案、无命中提示、加载提示均已双语化，不会出现英文兜底；
 - SSE 流式输出按中文小片段推送，观感与英文逐词输出一致。
 
+## 大知识库
+
+六段上下文足够回答「退款多久到账」，却完全不够回答「这里面都有谁」。在 100 份文档的
+知识库上，旧逻辑只会取最相近的 6 份，模型再把它们当成全部，于是理直气壮地答「知识库
+中收录了以下 6 位明星」。
+
+现在会在检索前先判断问题是不是在扫整个库：
+
+- **列举意图**——`有哪些` / `列出` / `all` / `which` / `how many` 等措辞会把召回放大到
+  `RAGBASE_LIST_TOP_K`（默认 20）条，并且**每份文档最多取一个切片**，所以 20 个名额覆盖
+  的是 20 份文档，而不是 7 份。
+- **问题里点了名就保持窄路径**——「周星驰演过哪些电影」能匹配到文件名，于是仍按单文档
+  查询处理，不会把整个库塞进 prompt。
+- **文档清单**——prompt 里额外附上每份文档一行（文件名 + 开头 60 字，通常就写着类别）。
+  「一共多少份 / 都有哪些」靠它才能答准。份数与字符数分别由 `RAGBASE_INVENTORY_DOCS` 和
+  `RAGBASE_CONTEXT_CHARS` 兜底，上万份文档也不会把 prompt 撑爆。
+
+用 `test-pdf/` 里 100 份生成的人物档案（每份一个切片）实测：
+
+| 问题 | 改前 | 改后 |
+|---|---|---|
+| 这个知识库里有哪些明星？ | 「收录了以下 6 位明星」+ 6 个人名 | 100 位，按类别分组 |
+| 有哪些女歌手 | 13 位里的 6 位 | 全部 13 位 |
+| 周星驰演过哪些电影？（单点查询） | 正确 | 不变，recall@6 = 100% |
+
+单人名查询改前改后都是 top-1 92% / recall@6 100%，放宽度并没有用精度换覆盖率。
+
 ## 兼容任意 OpenAI 协议模型
 
 | 提供方 | 对话 | 向量 |
@@ -160,7 +187,7 @@ docker run --rm -v ragbase-data:/data -v "$PWD":/backup alpine \
 
 ## 嵌入到任意网站
 
-在「嵌入集成」里创建 API 密钥，然后把这段代码贴到客户页面：
+在「嵌入与 API」里创建 API 密钥，然后把这段代码贴到客户页面：
 
 ```html
 <iframe src="https://your-host/widget?key=rbk_..." style="position:fixed;bottom:20px;right:20px;width:380px;height:600px;border:none;z-index:9999;border-radius:16px;box-shadow:0 8px 30px rgba(0,0,0,.35);" title="Knowledge base chat"></iframe>
@@ -175,9 +202,81 @@ curl -X POST https://your-host/api/widget/chat \
 # → {"conversation_id": "...", "answer": "...", "sources": [...]}
 ```
 
-密钥只绑定一个知识库且只能对话，不能管理文档或用户，随时可在「嵌入集成」中吊销。
-挂件页面（`app/static/widget.html`）是自包含的，标题、问候语、配色都便于按客户二次定制；
-要改默认语言，加 `?lang=zh` 或改 `STR` 字典。
+同一个端点加上 `"stream": true` 就是流式（SSE），格式与站内完全一致：每个 token 一帧
+`data: {"delta": "…"}`，最后一帧 `data: {"done": true, "conversation_id": "...", "sources": [...]}`：
+
+```bash
+curl -N -X POST https://your-host/api/widget/chat \
+  -H "X-API-Key: rbk_..." -H "Content-Type: application/json" \
+  -d '{"message": "退款政策是什么？", "stream": true}'
+```
+
+不想维护 iframe 标签的开发者，用一行 `<script>` 就够了：
+
+```html
+<script src="https://your-host/sdk.js" data-key="rbk_..." data-lang="zh"></script>
+```
+
+SDK 在 shadow root 里渲染（宿主页面的 CSS 漏不进来），自动拉取该密钥的配置，并暴露
+`RAGbase.open()`、`RAGbase.close()`、`RAGbase.toggle()`。想看某个密钥长什么样，直接开
+`/demo?key=rbk_...`。
+
+密钥只绑定一个知识库且只能对话，不能管理文档或用户，随时可在「嵌入与 API」中吊销。
+
+### 按密钥定制
+
+每个密钥各自带着自己的品牌、行为、内容和安全策略，所以同一个实例可以同时服务多个客户，
+彼此看不到对方的样式和数据。在「嵌入与 API」里点铅笔图标即可编辑，也可以走 API：
+
+```bash
+curl -X PATCH https://your-host/api/api-keys/KEY_ID \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{
+    "allowed_origins": ["customer.com", "*.customer.com"],
+    "config": {
+      "branding": {"theme": "light", "primaryColor": "#4f8cff", "title": "Acme 帮助中心",
+                   "position": "left", "hideBranding": true},
+      "behavior": {"autoOpen": "delay", "autoOpenDelay": 8,
+                   "starterQuestions": ["怎么收费？", "能退款吗？"],
+                   "fallbackMessage": "请联系 support@acme.com。"},
+      "content":  {"docIds": [], "quotaPerMin": 30, "quotaPerDay": 2000}
+    }
+  }'
+```
+
+`PATCH` 是深合并：只传要改的字段，其余保持不动。
+
+| 分组 | 可选项 |
+|---|---|
+| `branding` | `theme` auto/light/dark · `primaryColor`（#rgb 或 #rrggbb） · `title` · `subtitle` · `greeting` · `placeholder` · `position` right/left · `icon` chat/spark/logo + `logoUrl` · `hideBranding`（Pro） |
+| `behavior` | `autoOpen` never/delay/always + `autoOpenDelay` · `starterQuestions`（最多 4 条） · `showSources` · `persistSession` · `fallbackMessage` |
+| `content` | `docIds`（留空 = 整个知识库） · `quotaPerMin` · `quotaPerDay`（0 = 不限） |
+
+所有值在落库前都会按白名单重建：颜色必须是十六进制，枚举非法就回退默认值，文本会去掉首尾空白
+并截断长度，URL 必须是 http(s)。写坏的配置只会退化成默认值，不会弄坏挂件，也不会打开注入入口。
+
+### 安全：密钥是公开的，域名白名单不是
+
+嵌入密钥会出现在客户的 HTML 里，所以不能当秘密来对待。替代方案有两条：
+
+- **`allowed_origins`** —— 密钥只应答白名单内的域名。浏览器请求会拿到 403 且不给 CORS 授权；
+  `/widget` 同时返回 `Content-Security-Policy: frame-ancestors …`，浏览器会拒绝在其他站点渲染它。
+  服务端对服务端（没有 `Origin` 头）仍然放行：持有密钥本身就代表授权。
+- **配额** —— `quotaPerMin` / `quotaPerDay` 拦住跑飞的客户端，超限返回 429 并带 `Retry-After`。
+  计数放在进程内存里，重启即清零。
+
+`allowed_origins` 留空时会保持旧版本的宽松行为 —— 把密钥交给第三方之前，先把这一项填上。
+
+### 白标是付费能力
+
+`hideBranding` 只在 `plan` 为 `pro` 的密钥上生效；`free` 上会被静默忽略，升级后会重新恢复，
+因为那个选择一直存在库里。只有管理员能把密钥切到 `pro`：
+
+```bash
+curl -X PATCH https://your-host/api/admin/api-keys/KEY_ID/plan \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"plan": "pro"}'
+```
 
 ![嵌入网站](docs/hero_2_integration.png)
 
@@ -197,6 +296,9 @@ curl -X POST https://your-host/api/widget/chat \
 | `RAGBASE_MAX_UPLOAD_MB` | `25` | 单文件大小上限 |
 | `RAGBASE_CHUNK_SIZE` / `RAGBASE_CHUNK_OVERLAP` | `900` / `150` | 分块参数（字符数，中英通用） |
 | `RAGBASE_TOP_K` | `6` | 每次提问召回的段落数 |
+| `RAGBASE_LIST_TOP_K` | `20` | 库级问题（「有哪些」「列出」）的召回数；`0` 表示关闭放宽与文档清单 |
+| `RAGBASE_INVENTORY_DOCS` | `200` | prompt 里文档清单最多列多少份 |
+| `RAGBASE_CONTEXT_CHARS` | `24000` | 单次回答送进模型的检索正文总字符数（含清单） |
 | `RAGBASE_DATA_DIR` | `data` | SQLite 位置 |
 
 ## 部署

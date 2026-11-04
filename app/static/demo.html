@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RAGbase — Embed demo</title>
+<style>
+  :root {
+    --bg: #0b0e12; --panel: #141a21; --border: #232c37;
+    --text: #e4e9ef; --dim: #8d9aa8; --accent: #c6f24e; --ink: #131a08;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  [hidden] { display: none !important; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "Avenir Next", "Helvetica Neue", "Segoe UI", -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+  /* the "customer site" — deliberately empty so the widget is the subject */
+  .stage {
+    min-height: 100%;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; padding: 40px 24px 160px; text-align: center;
+  }
+  .stage .kicker {
+    font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--dim); opacity: .8;
+  }
+  .stage h1 { font-size: 21px; font-weight: 600; letter-spacing: -.01em; }
+  .stage p { font-size: 13.5px; color: var(--dim); line-height: 1.6; max-width: 34em; }
+
+  /* floating launcher — what the visitor actually sees on a customer site */
+  .launcher {
+    position: fixed; right: 20px; bottom: 20px;
+    width: 56px; height: 56px; border-radius: 50%;
+    display: grid; place-items: center;
+    background: var(--accent); color: var(--ink);
+    border: none; cursor: pointer;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+    transition: transform .16s ease, box-shadow .16s ease;
+    z-index: 50;
+  }
+  .launcher:hover { transform: translateY(-1px) scale(1.04); box-shadow: 0 10px 28px rgba(0, 0, 0, .55); }
+  .launcher:active { transform: scale(.97); }
+  .launcher .i-close, .launcher .i-spark, .launcher .i-logo { display: none; }
+  .launcher.is-open .i-chat, .launcher.is-open .i-spark, .launcher.is-open .i-logo { display: none; }
+  .launcher.is-open .i-close { display: block; }
+  .launcher[data-icon="spark"] .i-chat { display: none; }
+  .launcher[data-icon="spark"] .i-spark { display: block; }
+  .launcher[data-icon="logo"] .i-chat { display: none; }
+  .launcher[data-icon="logo"] .i-logo { display: block; width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
+
+  /* the widget's configured corner */
+  body.pos-left .launcher { right: auto; left: 20px; }
+  body.pos-left .panel { right: auto; left: 20px; transform-origin: bottom left; }
+
+  /* the chat panel the launcher reveals */
+  .panel {
+    position: fixed; right: 20px; bottom: 92px;
+    width: 380px; height: 600px; max-height: calc(100vh - 124px);
+    border-radius: 16px; overflow: hidden;
+    background: var(--panel); border: 1px solid var(--border);
+    box-shadow: 0 18px 50px rgba(0, 0, 0, .55);
+    transform-origin: bottom right;
+    opacity: 0; transform: translateY(10px) scale(.97);
+    visibility: hidden; pointer-events: none;
+    transition: opacity .18s ease, transform .18s ease, visibility 0s linear .18s;
+    z-index: 40;
+  }
+  .panel.open {
+    opacity: 1; transform: none;
+    visibility: visible; pointer-events: auto;
+    transition: opacity .18s ease, transform .18s ease, visibility 0s linear 0s;
+  }
+  .panel iframe { display: block; width: 100%; height: 100%; border: 0; }
+
+  .nokey {
+    height: 100%; display: flex; flex-direction: column; justify-content: center;
+    gap: 8px; padding: 28px; text-align: center;
+  }
+  .nokey strong { font-size: 14px; font-weight: 600; }
+  .nokey span { font-size: 12.5px; color: var(--dim); line-height: 1.6; }
+  .nokey code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px;
+    color: var(--accent);
+  }
+
+  @media (max-width: 460px) {
+    .panel {
+      right: 12px; left: 12px; bottom: 88px;
+      width: auto; height: calc(100vh - 108px); max-height: none;
+      transform-origin: bottom center;
+    }
+    .launcher { right: 16px; bottom: 16px; }
+    body.pos-left .launcher { right: auto; left: 16px; }
+    body.pos-left .panel { right: 12px; left: 12px; transform-origin: bottom center; }
+    .stage { padding-bottom: 140px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .panel, .launcher { transition: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="stage">
+  <p class="kicker" id="kicker">Demo site</p>
+  <h1 id="title">Any page on your website</h1>
+  <p id="sub">The chat widget sits in the bottom-right corner. Click the icon to open it.</p>
+</div>
+
+<div class="panel" id="panel" aria-hidden="true">
+  <div class="nokey" id="nokey" hidden>
+    <strong id="nokey-title">No API key</strong>
+    <span id="nokey-body">Open this demo from the “Integration &amp; API” panel so a key is attached.</span>
+  </div>
+  <iframe id="frame" title="Knowledge base chat" loading="lazy"></iframe>
+</div>
+
+<button class="launcher" id="launcher" type="button" aria-expanded="false" data-icon="chat">
+  <svg class="i-chat" width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <path d="M20.5 11.6a8.3 8.3 0 0 1-8.9 8.3 9.4 9.4 0 0 1-4.1-.9L3.5 20.3l1.2-3.9a8.1 8.1 0 0 1-1.2-4.4 8.3 8.3 0 0 1 8.5-8A8.3 8.3 0 0 1 20.5 11.6z"
+      stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+  <svg class="i-spark" width="23" height="23" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <path d="M12 3l1.9 5.3L19 10l-5.1 1.7L12 17l-1.9-5.3L5 10l5.1-1.7L12 3z"
+      stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+    <path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"
+      stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+  </svg>
+  <img class="i-logo" id="launcher-logo" alt="" />
+  <svg class="i-close" width="22" height="22" viewBox="0 0 22 22" fill="none" aria-hidden="true">
+    <path d="M6 6l10 10M16 6L6 16" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/>
+  </svg>
+</button>
+
+<script>
+"use strict";
+const PARAMS = new URLSearchParams(location.search);
+const KEY = PARAMS.get("key") || "";
+const LANG = (PARAMS.get("lang") || navigator.language || "en").toLowerCase().startsWith("zh") ? "zh" : "en";
+
+const STR = LANG === "zh" ? {
+  kicker: "演示站点",
+  title: "你可以把它放在任意页面",
+  sub: "聊天挂件悬浮在页面角落。点击图标展开对话 —— 这就是访客看到的完整效果。",
+  open: "打开聊天",
+  close: "关闭聊天",
+  nokeyTitle: "缺少 API 密钥",
+  nokeyBody: "请从「嵌入与 API」面板打开本演示，会自动带上密钥。",
+} : {
+  kicker: "Demo site",
+  title: "Any page on your website",
+  sub: "The chat widget floats in a page corner. Click the icon to open it.",
+  open: "Open chat",
+  close: "Close chat",
+  nokeyTitle: "No API key",
+  nokeyBody: "Open this demo from the “Integration & API” panel so a key is attached.",
+};
+
+document.documentElement.lang = LANG === "zh" ? "zh-CN" : "en";
+document.getElementById("kicker").textContent = STR.kicker;
+document.getElementById("title").textContent = STR.title;
+document.getElementById("sub").textContent = STR.sub;
+document.getElementById("nokey-title").textContent = STR.nokeyTitle;
+document.getElementById("nokey-body").textContent = STR.nokeyBody;
+
+const panel = document.getElementById("panel");
+const launcher = document.getElementById("launcher");
+const frame = document.getElementById("frame");
+const nokey = document.getElementById("nokey");
+let loaded = false;
+
+function loadFrame() {
+  if (loaded) return;
+  loaded = true;
+  if (!KEY) {
+    // nothing to authenticate with: say so instead of showing a 401 inside the iframe
+    frame.remove();
+    nokey.hidden = false;
+    return;
+  }
+  nokey.remove();
+  frame.src = "/widget?key=" + encodeURIComponent(KEY) + "&lang=" + LANG;
+}
+
+function setOpen(open) {
+  if (open) loadFrame();
+  panel.classList.toggle("open", open);
+  launcher.classList.toggle("is-open", open);
+  panel.setAttribute("aria-hidden", String(!open));
+  launcher.setAttribute("aria-expanded", String(open));
+  launcher.setAttribute("aria-label", open ? STR.close : STR.open);
+  launcher.title = open ? STR.close : STR.open;
+}
+
+launcher.setAttribute("aria-label", STR.open);
+launcher.title = STR.open;
+launcher.addEventListener("click", () => setOpen(!panel.classList.contains("open")));
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && panel.classList.contains("open")) {
+    setOpen(false);
+    launcher.focus();
+  }
+});
+
+/* ---------------- the key's own branding ---------------- */
+function inkFor(color) {
+  const hex = color.length === 4
+    ? "#" + color[1] + color[1] + color[2] + color[2] + color[3] + color[3]
+    : color;
+  const m = /^#([0-9a-f]{6})$/i.exec(hex);
+  if (!m) return "#131a08";
+  const n = parseInt(m[1], 16);
+  const lum = (0.2126 * ((n >> 16) & 255) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255)) / 255;
+  return lum > 0.6 ? "#131a08" : "#ffffff";
+}
+
+async function loadConfig() {
+  if (!KEY) return null;
+  try {
+    const res = await fetch("/api/widget/config?key=" + encodeURIComponent(KEY));
+    if (!res.ok) return null;
+    return (await res.json()).config || null;
+  } catch {
+    return null; // offline or blocked: the demo still works with the defaults
+  }
+}
+
+function applyConfig(cfg) {
+  if (!cfg) return;
+  const b = cfg.branding || {};
+  const beh = cfg.behavior || {};
+  if (b.primaryColor) {
+    document.documentElement.style.setProperty("--accent", b.primaryColor);
+    document.documentElement.style.setProperty("--ink", inkFor(b.primaryColor));
+  }
+  if (b.position === "left") document.body.classList.add("pos-left");
+  if (b.icon) {
+    launcher.dataset.icon = b.icon;
+    if (b.icon === "logo" && b.logoUrl) document.getElementById("launcher-logo").src = b.logoUrl;
+  }
+  if (beh.autoOpen === "always") {
+    setTimeout(() => setOpen(true), 400);
+  } else if (beh.autoOpen === "delay") {
+    setTimeout(() => setOpen(true), Math.max(1, beh.autoOpenDelay || 5) * 1000);
+  }
+}
+
+loadConfig().then(applyConfig);
+</script>
+</body>
+</html>

@@ -1,9 +1,10 @@
 """BM25 lexical retrieval with per-user in-memory index and caching.
 
-The index is built lazily on first query for a user and invalidated whenever
-the user's document/chunk counts change (uploads and deletions). Tokenization
-is shared with the demo embedding provider: latin words + CJK unigrams.
+The index is built lazily on first query and invalidated whenever the user's
+document/chunk counts change (uploads and deletions). Tokenization is shared
+with the demo embedding provider: latin words + CJK bigrams.
 """
+import hashlib
 import math
 import threading
 from collections import Counter, defaultdict
@@ -12,6 +13,8 @@ import numpy as np
 
 from . import database as db
 from .providers import _tokens
+
+_CACHE_LIMIT = 256  # a scoped index per (user, doc set) — bound the memory
 
 
 class BM25Index:
@@ -60,21 +63,33 @@ def _fingerprint(user_id: str) -> tuple[int, int]:
     return int(row["docs"]), int(row["chunks"])
 
 
-def get_index(user_id: str) -> BM25Index:
+def get_index(user_id: str, doc_ids=None) -> BM25Index:
+    """Index for one user, optionally restricted to a set of documents.
+
+    A scoped index gets its own cache slot: restricting the corpus changes both
+    avgdl and every idf, so scores from a full index cannot simply be filtered.
+    """
     fp = _fingerprint(user_id)
+    sig = hashlib.md5(",".join(sorted(doc_ids)).encode()).hexdigest()[:16] if doc_ids else ""
+    cache_key = user_id + "|" + sig
     with _lock:
-        cached = _cache.get(user_id)
+        cached = _cache.get(cache_key)
         if cached and cached[0] == fp:
             return cached[1]
-    rows = db.get_conn().execute(
-        "SELECT c.id, c.content FROM chunks c WHERE c.user_id = ? ORDER BY c.doc_id, c.idx",
-        (user_id,),
-    ).fetchall()
+    sql = "SELECT c.id, c.content FROM chunks c WHERE c.user_id = ?"
+    params: list = [user_id]
+    if doc_ids:
+        sql += f" AND c.doc_id IN ({','.join('?' * len(doc_ids))})"
+        params.extend(doc_ids)
+    sql += " ORDER BY c.doc_id, c.idx"  # must match db.all_chunk_vectors
+    rows = db.get_conn().execute(sql, params).fetchall()
     index = BM25Index([_tokens(r["content"]) for r in rows])
     with _lock:
-        _cache[user_id] = (fp, index)
+        if len(_cache) >= _CACHE_LIMIT:
+            _cache.clear()
+        _cache[cache_key] = (fp, index)
     return index
 
 
-def bm25_scores(user_id: str, question: str) -> np.ndarray:
-    return get_index(user_id).scores(_tokens(question))
+def bm25_scores(user_id: str, question: str, doc_ids=None) -> np.ndarray:
+    return get_index(user_id, doc_ids).scores(_tokens(question))
